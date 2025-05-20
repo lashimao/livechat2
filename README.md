@@ -113,3 +113,103 @@ docker-compose up -d
 ```bash
 docker-compose logs -f
 ```
+
+### 自行部署WebRTC服务
+
+在Zeabur模板中提供了公共WebRTC服务，但公共服务可能会不稳定，建议单独自行私有化部署WebRTC服务。
+
+#### Docker方式部署WebRTC
+
+克隆仓库后，进入代码仓库的service/webrtc文件夹，使用Dockerfile构建WebRTC服务镜像：
+
+```bash
+cd service/webrtc
+docker build -t amadeus-webrtc-service .
+```
+
+运行WebRTC服务容器：
+
+```bash
+docker run -d --name amadeus-webrtc \
+  -p 80:80 -p 443:443 -p 3478:3478 -p 5349:5349 -p 49152-65535:49152-65535/udp \
+  -e LLM_API_KEY=你的OpenAI_API密钥 \
+  -e WHISPER_API_KEY=你的Whisper_API密钥 \
+  -e SILICONFLOW_API_KEY=你的硅基流动API密钥 \
+  -e SILICONFLOW_VOICE=你的硅基流动语音ID \
+  -e LLM_BASE_URL=你的大语言模型API的基础URL \
+  -e WHISPER_BASE_URL=你的Whisper API的基础URL \
+  -e WHISPER_MODEL=你的Whisper模型版本 \
+  -e AI_MODEL=你的大语言模型名称 \
+  -e MEM0_API_KEY=你的MEM0记忆服务API密钥 \
+  -e TIME_LIMIT=你的WebRTC流的最大时间限制(秒) \
+  -e CONCURRENCY_LIMIT=你的最大并发连接数 \
+  amadeus-webrtc-service
+```
+
+#### WebRTC服务环境变量说明
+
+以下是WebRTC服务的内置AI服务的环境变量说明，可以用于搭建公共服务：
+
+| 环境变量 | 说明 | 默认值 |
+|---------|------|-------|
+| `LLM_API_KEY` | OpenAI或兼容API的密钥，用于大语言模型服务 | 无 |
+| `WHISPER_API_KEY` | Whisper API密钥，用于语音识别服务 | 无 |
+| `SILICONFLOW_API_KEY` | 硅基流动API密钥，用于语音合成服务 | 无 |
+| `SILICONFLOW_VOICE` | 硅基流动你自定义的语音ID | 无 |
+| `LLM_BASE_URL` | 大语言模型API的基础URL | 无 |
+| `WHISPER_BASE_URL` | Whisper API的基础URL | 无 |
+| `WHISPER_MODEL` | 使用的Whisper模型版本 | 无 |
+| `AI_MODEL` | 使用的大语言模型名称 | 无 |
+| `MEM0_API_KEY` | MEM0记忆服务的API密钥 | 无 |
+| `TIME_LIMIT` | WebRTC流的最大时间限制(秒) | 600 |
+| `CONCURRENCY_LIMIT` | 最大并发连接数 | 10 |
+
+#### 端口配置要求
+
+部署WebRTC服务时，需要确保服务器以下端口已开放：
+
+- 80: HTTP通信
+- 443: HTTPS通信
+- 3478: STUN/TURN服务（TCP）
+- 5349: STUN/TURN服务（TLS）
+- 49152-65535: 媒体流端口范围（UDP）
+
+> **注意**
+> 
+> 如果使用云服务提供商（如AWS、阿里云等），请确保在安全组/防火墙设置中开放这些端口。
+
+#### TURN服务器部署
+
+在生产环境中，为了处理复杂网络环境下的音视频穿透问题，通常需要部署TURN服务器。你可以：
+
+- 自行部署Coturn
+- 参考FastRTC部署文档进行AWS自动化部署
+
+##### 使用AWS自动部署TURN服务器
+
+FastRTC提供了一个自动化脚本，可在AWS上部署TURN服务器：
+
+1. 克隆FastRTC部署仓库
+2. 配置AWS CLI并创建EC2密钥对
+3. 修改参数文件，填入TURN用户名和密码
+4. 运行CloudFormation脚本自动部署
+
+详细步骤请参考FastRTC的自托管部署指南。
+
+部署完成后，可在WebRTC服务的代码中填入TURN服务器信息：
+
+```json
+{
+  "iceServers": [
+    {
+      "urls": "turn:你的TURN服务器IP:3478",
+      "username": "你设置的用户名",
+      "credential": "你设置的密码"
+    }
+  ]
+}
+```
+
+> **提示**
+> 
+> 正确配置TURN服务器后，即使在复杂的网络环境（如对称NAT、企业防火墙后）也能保证音视频通信的稳定性。
