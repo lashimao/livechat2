@@ -60,7 +60,7 @@ def translate_text(text, target_language, source_language='zh'):
         logging.error(f"调用翻译API时出错: {e}")
         return text
 
-def text_to_speech_stream(text, voice=None, sample_rate=32000, target_language=None, api_key=None):
+def text_to_speech_stream(text, voice=None, sample_rate=32000, target_language=None, source_language='zh', api_key=None):
     """
     将文本转换为语音流
     
@@ -69,6 +69,7 @@ def text_to_speech_stream(text, voice=None, sample_rate=32000, target_language=N
         voice (str): 使用的声音模型，如不指定则使用环境变量中的设置
         sample_rate (int): 采样率，默认为32000Hz
         target_language (str): 目标语言代码，如果指定则先将文本翻译为目标语言
+        source_language (str): 源语言代码，默认为'zh'
         api_key (str): SiliconFlow API 密钥，如不指定则使用环境变量中的设置
         
     返回:
@@ -78,9 +79,9 @@ def text_to_speech_stream(text, voice=None, sample_rate=32000, target_language=N
         logging.warning("文本为空，不进行转换")
         return
     
-    # 如果指定了目标语言，先进行翻译
-    if target_language:
-        text = translate_text(text, target_language)
+    # 如果指定了目标语言且源语言与目标语言不同，才进行翻译
+    if target_language and source_language != target_language:
+        text = translate_text(text, target_language, source_language)
     
     # 如果未指定voice参数，则使用环境变量中的设置
     if voice is None:
@@ -155,4 +156,4 @@ def text_to_speech_stream(text, voice=None, sample_rate=32000, target_language=N
         else:
             logging.error(f"SILICONFLOW API返回错误: {response.status_code} {response.text}")
     except Exception as e:
-        logging.error(f"调用文本转语音API时出错: {e}") 
+        logging.error(f"调用文本转语音API时出错: {e}")    

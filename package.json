@@ -102,6 +102,10 @@
       {
         "from": "electron/build/",
         "to": "icon"
+      },
+      {
+        "from": "electron/loading.html",
+        "to": "electron/loading.html"
       }
     ],
     "win": {

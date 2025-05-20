@@ -52,16 +52,7 @@ def generate_sys_prompt(
     if model is None:
         model = AI_MODEL
     
-    # 只有当模型名称包含"claude"时才添加output_format部分
-    if "claude" in model.lower():
-        if is_same_language:
-            output_format = f'严格按照"{voice_lang_text}</seg>{text_lang_text}</seg>{voice_lang_text}</seg>{text_lang_text}</seg>..." 的格式输出\n      <Reason>方便我进行分段tts，这样能够让我快速转tts</Reason>'
-        else:
-            output_format = f'严格按照 "{voice_lang_text}</seg>{text_lang_text}</seg>{voice_lang_text}</seg>{text_lang_text}</seg>..." 的格式输出\n         <Reason>方便我进行分段tts，要求必须最先输出{voice_lang_text}，再输出"</seg>"，最后再输出{text_lang_text}，这样能够让我快速转tts</Reason>'
-        
-        output_format_section = f"<Output_format>{output_format}</Output_format>"
-    else:
-        output_format_section = f"<Output_language>{text_lang_text}</Output_language>"
+    output_format_section = f"<Output_language>{text_lang_text}</Output_language>"
     
     # 使用 datetime 生成当前时间
     current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -83,4 +74,4 @@ def generate_sys_prompt(
     <CurrentTime>{current_time}</CurrentTime>
     </Instruction>"""
     
-    return final_prompt 
+    return final_prompt  
