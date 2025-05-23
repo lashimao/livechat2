@@ -8,6 +8,7 @@ import gradio as gr
 from fastapi.middleware.cors import CORSMiddleware  # 用于处理跨域请求
 import numpy as np  # 用于数值计算和数组操作
 import io  # 用于处理输入输出流
+import base64 # Added for TTS audio processing
 import requests  # 用于发送HTTP请求
 import asyncio  # 用于异步编程
 from mem0 import AsyncMemoryClient
@@ -23,7 +24,8 @@ from openai import OpenAI
 from utils import run_async, generate_sys_prompt, process_llm_stream, generate_unique_user_id
 from ai import ai_stream, AI_MODEL, predict_emotion  # 从ai模块导入
 from ai.plan import ActionPlanner  # 导入ActionPlanner类
-from stt import transcribe
+from .ai.google_live_api import GoogleLiveClient # Added GoogleLiveClient import
+from stt import transcribe # Keep for potential fallback or other uses, though primary STT is changing
 from tts import text_to_speech_stream
 from routes import router, init_router, get_user_config, InputData  # 导入路由模块及用户配置
 from contextlib import asynccontextmanager
@@ -38,6 +40,7 @@ vad_model = HumAwareVADModel()
 DEFAULT_LLM_API_KEY = os.getenv("LLM_API_KEY", "")
 DEFAULT_WHISPER_API_KEY = os.getenv("WHISPER_API_KEY", "")
 DEFAULT_SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY", "")
+DEFAULT_GOOGLE_GEMINI_API_KEY = os.getenv("GOOGLE_GEMINI_API_KEY", "")
 DEFAULT_LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.ephone.ai/v1")
 DEFAULT_WHISPER_BASE_URL = os.getenv("WHISPER_BASE_URL", "https://amadeus-ai-api-2.zeabur.app/v1")
 DEFAULT_AI_MODEL = os.getenv("AI_MODEL")
@@ -50,8 +53,11 @@ DEFAULT_CONCURRENCY_LIMIT = int(os.getenv("CONCURRENCY_LIMIT", "10"))
 # 设置默认的语言选项和参数
 DEFAULT_VOICE_OUTPUT_LANGUAGE = 'ja'
 DEFAULT_TEXT_OUTPUT_LANGUAGE = 'zh'
-DEFAULT_SYSTEM_PROMPT = """命运石之门(steins gate)的牧濑红莉栖(kurisu),一个天才少女,性格傲娇,不喜欢被叫克里斯蒂娜"""
+DEFAULT_SYSTEM_PROMPT = """命运石之门(steins gate)的牧濑红莉栖(kurisu),一个天才少女,性格傲娇,不喜欢被叫克里斯蒂娜""" # This is the raw system prompt
 DEFAULT_USER_NAME = "用户"
+DEFAULT_MAX_CONTEXT_LENGTH = 20 # Max number of turns (user + model messages) for API history (e.g., 10 user + 10 model = 20 total messages)
+DEFAULT_LIVE_API_MODEL = "gemini-1.5-flash-latest" # Default model for Google Live API
+DEFAULT_LIVE_API_VOICE = "echo-alloy" # Placeholder default voice for Google Live API TTS
 # 会话超时设置
 SESSION_TIMEOUT = timedelta(seconds=DEFAULT_TIME_LIMIT)
 # 清理间隔
@@ -112,18 +118,34 @@ def get_user_session(webrtc_id: str):
             model=get_user_ai_model(webrtc_id)
         )
         
-        # 创建初始消息列表
+        # Create initial session state
+        # 'messages' will store conversation history in the format:
+        # [{"role": "user", "parts": [{"text": "..."}, ...]}, {"role": "model", "parts": [{"text": "..."}, ...]}]
         user_sessions[webrtc_id] = {
-            "messages": [{"role": "system", "content": sys_prompt}],
+            "messages": [],  # Conversation history (user/model turns) starts empty
+            "raw_system_prompt": system_prompt, # Store the original (potentially unformatted) system prompt text from config/defaults
+            "system_prompt_text_for_api": sys_prompt, # Store the formatted system prompt for GoogleLiveClient constructor
             "voice_output_language": voice_output_language,
             "text_output_language": text_output_language,
-            "system_prompt": system_prompt,
             "user_name": user_name,
             "is_same_language": (voice_output_language == text_output_language),
-            "next_action": None  # 添加next_action字段，用于存储下一步行动计划
+            "next_action": None
         }
+        # The system prompt is no longer the first item in "messages".
+        # It's passed separately to GoogleLiveClient via system_instruction_text in its constructor.
     
     return user_sessions[webrtc_id]
+
+# Helper function to trim conversation history
+def trim_conversation_history(messages: list[dict], max_length: int) -> list[dict]:
+    """
+    Trims messages to the most recent max_length items.
+    Each item in 'messages' is a turn object e.g. {"role": "user", "parts": [...]}.
+    """
+    if len(messages) > max_length:
+        logging.info(f"Trimming conversation history from {len(messages)} to {max_length} turns.")
+        return messages[-max_length:]
+    return messages
 
 # 获取用户的OpenAI客户端
 def get_user_openai_client(webrtc_id: str):
@@ -144,6 +166,16 @@ def get_user_openai_client(webrtc_id: str):
 def get_user_ai_model(webrtc_id: str):
     config = get_user_config(webrtc_id)
     return config.ai_model if config and config.ai_model else DEFAULT_AI_MODEL
+
+# Get user-specific Google Live API model name
+def get_user_live_api_model(webrtc_id: str) -> str:
+    config = get_user_config(webrtc_id)
+    return config.live_api_model_name if config and config.live_api_model_name else DEFAULT_LIVE_API_MODEL
+
+# Get user-specific Google Live API TTS voice name
+def get_user_live_api_voice(webrtc_id: str) -> str:
+    config = get_user_config(webrtc_id)
+    return config.live_api_voice_name if config and config.live_api_voice_name else DEFAULT_LIVE_API_VOICE
 
 # 获取用户的语音转文本API配置
 def get_user_whisper_config(webrtc_id: str):
@@ -167,6 +199,13 @@ def get_user_mem0_config(webrtc_id: str):
     config = get_user_config(webrtc_id)
     return {
         "api_key": config.mem0_api_key if config and config.mem0_api_key else DEFAULT_MEM0_API_KEY
+    }
+
+# 获取用户的Gemini API配置
+def get_user_gemini_config(webrtc_id: str):
+    config = get_user_config(webrtc_id)
+    return {
+        "api_key": config.google_gemini_api_key if config and config.google_gemini_api_key else DEFAULT_GOOGLE_GEMINI_API_KEY
     }
 
 logging.basicConfig(level=logging.INFO)
@@ -264,6 +303,8 @@ async def run_predict_emotion(message, client=None):
     """
     return await predict_emotion(message, client)
 
+# Removed process_llm_stream function as it's being replaced by GoogleLiveClient logic
+
 # 定义echo函数，处理音频输入并返回音频输出
 def echo(audio: tuple[int, np.ndarray], message: str, input_data: InputData, next_action = "", video_frames = None):
     # 获取用户会话状态
@@ -278,120 +319,300 @@ def echo(audio: tuple[int, np.ndarray], message: str, input_data: InputData, nex
     
     prompt = "[AI主动发起对话]next Action: " + next_action
     user_id = generate_unique_user_id(session["user_name"])
-    if next_action == "":
-        stt_time = time.time()  # 记录开始时间
-        logging.info(f"用户 {input_data.webrtc_id} 正在执行STT")  # 记录日志
-        # 使用工具函数运行异步转录函数，传入配置
-        prompt = run_async(transcribe, audio, whisper_config["api_key"], whisper_config["base_url"], whisper_config["model"])
-        # 生成用户唯一ID
-        if prompt == "":  # 如果转录结果为空
-            logging.info("STT返回空字符串")  # 记录日志
-            return  # 结束函数
-        logging.info(f"STT响应: {prompt}")  # 记录转录结果
-    mem0_config = get_user_mem0_config(input_data.webrtc_id)
-    memory_client = AsyncMemoryClient(api_key=mem0_config["api_key"])
-    search_result = run_async(memory_client.search, query=prompt, user_id=user_id, limit=3)
-    logging.info(f"搜索结果: {search_result}")
-    # 确保从搜索结果中正确获取记忆
-    memories_text = "\n".join(memory["memory"] for memory in search_result)
-    logging.info(f"记忆文本: {memories_text}")
-    final_prompt = f"Relevant Memories/Facts:\n{memories_text}\n\nUser Question: {prompt}"
-    if next_action == "":
-        # 将用户的输入添加到用户消息历史
-        session["messages"].append({"role": "user", "content": final_prompt})
-        # 发送用户语音转文字结果到前端
-        transcript_json = json.dumps({"type": "transcript", "data": f"{prompt}"})
-        yield AdditionalOutputs(transcript_json)
-        # 记录语音识别所用时间
-        logging.info(f"STT耗时 {time.time() - stt_time} 秒")
-    # 记录LLM开始时间
-    llm_time = time.time()
-    # 获取用户的OpenAI客户端和AI模型
-    client = get_user_openai_client(input_data.webrtc_id)
-    model = get_user_ai_model(input_data.webrtc_id)
-    siliconflow_config = get_user_siliconflow_config(input_data.webrtc_id)
     
-    # 准备消息列表 - 为OpenAI API创建深拷贝，防止修改原始会话历史
-    messages_for_api = session["messages"].copy()
-    
-    # 如果有视频帧且摄像头已开启，添加视频帧到API请求中
-    if video_frames and input_data.is_camera_on and len(video_frames) > 0:
-        logging.info(f"正在将 {len(video_frames)} 帧视频数据传递给OpenAI API")
-        visual_messages = []
-        for frame in video_frames:
-            visual_messages.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/jpeg;base64,{frame['frame_data']}",
-                    "detail": "high"  # 指定高细节级别
-                }
-            })
-        if len(messages_for_api) > 0 and messages_for_api[-1]["role"] == "user":
-            # 如果最后一条是用户消息，将其内容转换为数组格式，添加视频帧
-            last_msg = messages_for_api[-1]
-            text_content = last_msg["content"]
-            last_msg["content"] = [{"type": "text", "text": text_content}] + visual_messages
-        else:
-            # 如果没有用户消息或最后一条不是用户消息，创建一个新的用户消息
-            sys_msg_with_frames = {
-                "role": "user", 
-                "content": [
-                    {"type": "text", "text": "用户提供了以下视频帧用于分析，请根据图像内容提供适当的回复："},
-                    *visual_messages
-                ]
-            }
-            messages_for_api.append(sys_msg_with_frames)
-    
-    # 使用封装的流处理函数
-    full_response = ""
-    stream_generator = process_llm_stream(
-        client=client,
-        messages=messages_for_api,  # 使用可能包含视频帧的消息副本
-        model=model,
-        siliconflow_config=siliconflow_config,
-        voice_output_language=session["voice_output_language"],
-        is_same_language=session["is_same_language"],
-        run_predict_emotion=run_predict_emotion,
-        ai_stream=ai_stream,
-        text_to_speech_stream=text_to_speech_stream,
-        max_context_length=20,
-    )
-    
-    # 处理生成器的输出
-    for item in stream_generator:
-        if isinstance(item, str):
-            full_response = item
-        else:
-            yield item
-
-    # 将助手的响应添加到用户消息历史
-    conversation_messages = [
-        {"role": "user", "content": prompt},
-        {"role": "assistant", "content": full_response}
-    ]
-    session["messages"].append({"role": "assistant", "content": full_response + " "})
-    logging.info(f"LLM响应: {full_response}")  # 记录LLM响应
-    
-    # 保存对话记忆
-    memory_client.add(conversation_messages, user_id=user_id)
-    logging.info(f"LLM耗时 {time.time() - llm_time} 秒")  # 记录LLM所用时间
-    
-    # LLM响应完成后，规划下一步行动
-    try:
-        # 创建ActionPlanner实例
-        action_planner = ActionPlanner(conversation_history=session["messages"][-5:])
-        # 异步执行行动计划
-        next_action = run_async(action_planner.plan_next_action, client)
-        # 更新用户会话中的next_action字段
-        session["next_action"] = next_action
-        logging.info(f"下一步行动计划: {next_action}")
+    # --- ASR Phase (Google Live API) ---
+    if next_action == "": # Only do ASR if not an AI-triggered action
+        stt_time = time.time()
+        logging.info(f"User {input_data.webrtc_id} performing ASR using GoogleLiveClient")
         
-        # 通知前端下一步行动计划
-        next_action_json = json.dumps({"type": "next_action", "data": next_action})
-        yield AdditionalOutputs(next_action_json)
+        google_gemini_api_key = get_user_gemini_config(input_data.webrtc_id).get('api_key')
+        if not google_gemini_api_key:
+            logging.error(f"Google Gemini API key not found for {input_data.webrtc_id}. Skipping ASR.")
+            return
+
+        asr_model_name = get_user_ai_model(input_data.webrtc_id) # Use same model for ASR for now
+        asr_client = GoogleLiveClient(
+            api_key=google_gemini_api_key,
+            model_name=asr_model_name,
+            response_modalities=["TEXT"], # ASR only needs text
+            enable_asr=True,
+            enable_tts_transcription=False
+        )
+        
+        asr_result = {}
+        try:
+            connected = run_async(asr_client.connect())
+            if not connected:
+                logging.error(f"Failed to connect to Google Live API for ASR for {input_data.webrtc_id}.")
+                return
+
+            audio_bytes = audio_to_bytes(audio)
+            logging.info(f"Converted audio to {len(audio_bytes)} bytes for Google Live ASR.")
+            run_async(asr_client.send_audio_chunk(audio_bytes))
+            run_async(asr_client.send_activity_end())
+            logging.info(f"ASR audio sent, awaiting transcription for {input_data.webrtc_id}...")
+
+            async def receive_asr_prompt_helper(client: GoogleLiveClient, webrtc_id: str):
+                final_prompt_text = ""
+                ui_transcripts = []
+                async for message in client.receive_messages():
+                    logging.debug(f"ASR client message for {webrtc_id}: {message}")
+                    processed = client.process_server_content_parts(message) # Use the static helper
+                    
+                    if processed.get("error"):
+                        logging.error(f"ASR error from Google Live API for {webrtc_id}: {processed['error']}")
+                        break
+                    
+                    if processed.get("input_transcription_text"):
+                        transcript_segment = processed["input_transcription_text"]
+                        ui_transcripts.append(transcript_segment) # For UI updates
+                        if processed.get("input_transcription_is_final"):
+                            final_prompt_text = transcript_segment # Overwrite with final if available
+                            logging.info(f"ASR final segment for {webrtc_id}: '{final_prompt_text}'")
+                            # Assuming the first final segment is the one we want for the prompt
+                            break # Got the final ASR
+                        else:
+                            logging.info(f"ASR partial segment for {webrtc_id}: '{transcript_segment}'")
+                return {"final_asr_prompt": final_prompt_text, "ui_transcripts": ui_transcripts}
+
+            asr_result = run_async(receive_asr_prompt_helper(asr_client, input_data.webrtc_id))
+            prompt = asr_result.get("final_asr_prompt", "")
+
+        except Exception as e:
+            logging.error(f"Error during Google Live ASR for {input_data.webrtc_id}: {type(e).__name__} - {e}")
+            prompt = ""
+        finally:
+            if asr_client:
+                run_async(asr_client.close())
+                logging.info(f"Google Live ASR client closed for {input_data.webrtc_id}.")
+
+        # Yield partial transcripts for UI
+        if asr_result.get("ui_transcripts"):
+            for ui_transcript in asr_result["ui_transcripts"]:
+                yield AdditionalOutputs(json.dumps({"type": "transcript", "data": ui_transcript}))
+        
+        if not prompt:
+            logging.info(f"Google Live ASR returned empty prompt for {input_data.webrtc_id}.")
+            return
+        logging.info(f"Google Live ASR final prompt for {input_data.webrtc_id}: '{prompt}' (Time: {time.time() - stt_time:.2f}s)")
+        
+        # Update session with user's ASR prompt
+        session["messages"].append({"role": "user", "content": prompt})
+        # Send transcript to UI (already done if we yielded partials, but can send final too)
+        # yield AdditionalOutputs(json.dumps({"type": "transcript", "data": prompt})) # Redundant if partials sent
+    
+    # If next_action is set (AI initiated), 'prompt' is already populated from that.
+    # If ASR was skipped due to no next_action, and ASR failed, 'prompt' would be empty.
+    # If ASR succeeded, 'prompt' has the user's speech.
+
+    if not prompt: # If prompt is still empty (e.g. AI-triggered action with no text, or ASR failed and next_action was also empty)
+        logging.warning(f"No prompt available for LLM for {input_data.webrtc_id} (ASR might have failed or no input).")
+        return
+
+    # --- Unified ASR, LLM, TTS Phase using a single GoogleLiveClient session ---
+    
+    start_time = time.time() # Overall timer for the interaction
+    final_asr_prompt = ""
+    final_llm_response = ""
+
+    # Get API key and model name once
+    google_gemini_api_key = get_user_gemini_config(input_data.webrtc_id).get('api_key')
+    if not google_gemini_api_key:
+        logging.error(f"Google Gemini API key not found for {input_data.webrtc_id}. Cannot proceed.")
+        return
+    
+    # Use new getters for Google Live API model and voice
+    live_api_model_to_use = get_user_live_api_model(input_data.webrtc_id)
+    live_api_voice_to_use = get_user_live_api_voice(input_data.webrtc_id)
+    
+    # Fetch the system prompt text that was formatted and stored in the session by get_user_session or handle_config_update.
+    system_prompt_text_for_api = session.get("system_prompt_text_for_api", DEFAULT_SYSTEM_PROMPT)
+
+
+    gemini_client = GoogleLiveClient(
+        api_key=google_gemini_api_key,
+        model_name=live_api_model_to_use, 
+        response_modalities=["TEXT", "AUDIO"], 
+        enable_asr=True,                      
+        enable_tts_transcription=True, 
+        system_instruction_text=system_prompt_text_for_api,
+        voice_name=live_api_voice_to_use # Pass the selected voice name
+    )
+
+    try:
+        logging.info(f"Attempting to connect single GoogleLiveClient for {input_data.webrtc_id} with System Instruction: '{system_prompt_text_for_api[:100]}...'")
+        connected = run_async(gemini_client.connect())
+        if not connected:
+            logging.error(f"Failed to connect single GoogleLiveClient for {input_data.webrtc_id}.")
+            return
+
+        async def handle_live_interaction_loop(
+            client: GoogleLiveClient, 
+            initial_audio_data: tuple[int, np.ndarray], 
+            current_session: dict, 
+            webrtc_id: str,
+            user_id_for_mem0: str 
+        ):
+            asr_prompt_finalized = "" 
+            llm_response_parts = []
+            tts_audio_items_list = []
+            asr_ui_updates_list = [] 
+            
+            if next_action == "": 
+                audio_bytes_for_asr = audio_to_bytes(initial_audio_data)
+                logging.info(f"Sending initial audio ({len(audio_bytes_for_asr)} bytes) for ASR to {webrtc_id}.")
+                await client.send_audio_chunk(audio_bytes_for_asr)
+                await client.send_activity_end()
+                logging.info(f"Initial audio and activity_end sent for ASR for {webrtc_id}.")
+                has_sent_asr_to_llm = False
+            else: 
+                asr_prompt_finalized = prompt # This 'prompt' is from the outer scope, already set to next_action text
+                logging.info(f"AI-triggered action for {webrtc_id}. Using prompt: '{asr_prompt_finalized}'")
+                
+                # Add AI-triggered user message to session history (formatted for API)
+                # This is the first user message in this turn.
+                # IMPORTANT: Use the Google API 'turns' structure: {"role": "user", "parts": [{"text": "..."}]}
+                current_session["messages"].append({"role": "user", "parts": [{"text": asr_prompt_finalized}]})
+                
+                # Prepare turns for API: current message + prior history from session.
+                # No Mem0 augmentation for AI-triggered actions for now.
+                # History is already in current_session["messages"]
+                turns_for_api = trim_conversation_history(list(current_session["messages"]), DEFAULT_MAX_CONTEXT_LENGTH)
+                
+                await client.send_text(turns=turns_for_api, turn_complete=True)
+                has_sent_asr_to_llm = True 
+                logging.info(f"Sent AI-triggered prompt with history to LLM for {webrtc_id}.")
+            
+            async for message in client.receive_messages():
+                logging.debug(f"Unified client message for {webrtc_id}: {message}")
+                processed = client.process_server_content_parts(message)
+
+                if processed.get("error"):
+                    logging.error(f"Error from Google Live API for {webrtc_id}: {processed['error']}")
+                    break 
+
+                if not has_sent_asr_to_llm and processed.get("input_transcription_text"):
+                    asr_text_segment = processed["input_transcription_text"]
+                    asr_ui_updates_list.append(asr_text_segment) 
+                    
+                    if processed.get("input_transcription_is_final"):
+                        asr_prompt_finalized = asr_text_segment 
+                        logging.info(f"Final ASR prompt for {webrtc_id}: '{asr_prompt_finalized}'")
+                        
+                        # Append actual user utterance to session messages (this is the "original" user input for this turn)
+                        # Using the Google API 'turns' structure
+                        current_session["messages"].append({"role": "user", "parts": [{"text": asr_prompt_finalized}]})
+                        
+                        mem0_config_local = get_user_mem0_config(webrtc_id)
+                        memory_client_local = AsyncMemoryClient(api_key=mem0_config_local["api_key"])
+                        search_results_local = await memory_client_local.search(query=asr_prompt_finalized, user_id=user_id_for_mem0, limit=3)
+                        memories_text_local = "\n".join(m["memory"] for m in search_results_local if m.get("memory"))
+                        
+                        user_prompt_for_llm_augmented = asr_prompt_finalized
+                        if memories_text_local:
+                            user_prompt_for_llm_augmented = f"Relevant Memories/Facts from previous conversations (for your reference only, do not directly mention these unless relevant to the current query):\n{memories_text_local}\n\nUser's current message: {asr_prompt_finalized}"
+                        
+                        # Prepare turns for API: history (all messages *before* current original user prompt) + current *augmented* user prompt
+                        # The history is current_session["messages"][:-1] (all up to, but not including, the just-added user prompt)
+                        turns_for_api_history = list(current_session["messages"][:-1]) 
+                        current_turn_for_api = [{"role": "user", "parts": [{"text": user_prompt_for_llm_augmented}]}]
+                        # Note: The above `current_turn_for_api` replaces the last item if we consider full history.
+                        # For Google's `turns` API, we send the history AND the current turn.
+                        # The `turns` should represent the conversation up to the point of the current query.
+                        # So, `turns_for_api_history` (already containing previous user/model turns)
+                        # should be followed by the *new* user turn (augmented).
+                        
+                        final_turns_for_api = trim_conversation_history(turns_for_api_history + current_turn_for_api, DEFAULT_MAX_CONTEXT_LENGTH)
+                        
+                        await client.send_text(turns=final_turns_for_api, turn_complete=True)
+                        has_sent_asr_to_llm = True
+                        logging.info(f"Sent final ASR prompt with history/memories to LLM for {webrtc_id}.")
+                
+                if has_sent_asr_to_llm: 
+                    if processed.get("llm_text"):
+                        llm_response_parts.append(processed["llm_text"])
+                    
+                    if processed.get("tts_audio_bytes"):
+                        tts_bytes = processed["tts_audio_bytes"]
+                        sample_rate = 24000 
+                        audio_arr = np.frombuffer(tts_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                        tts_audio_items_list.append((sample_rate, audio_arr))
+
+                    if processed.get("output_transcription_text"):
+                        logging.info(f"TTS transcription for {webrtc_id}: {processed['output_transcription_text']}")
+
+                    if processed.get("generation_complete"):
+                        logging.info(f"LLM generation complete for {webrtc_id}.")
+                        break 
+            
+            final_llm_response_text = "".join(llm_response_parts)
+            if final_llm_response_text: 
+                 # Using the Google API 'turns' structure
+                 current_session["messages"].append({"role": "model", "parts": [{"text": final_llm_response_text}]})
+            
+            return {
+                "final_asr_prompt": asr_prompt_finalized, 
+                "asr_ui_updates": asr_ui_updates_list,
+                "final_llm_response": final_llm_response_text,
+                "tts_audio_items": tts_audio_items_list
+            }
+
+        interaction_results = run_async(
+            handle_live_interaction_loop(gemini_client, audio, session, input_data.webrtc_id, user_id)
+        )
+
+        if interaction_results:
+            final_asr_prompt = interaction_results.get("final_asr_prompt", prompt if next_action else "") 
+            full_response = interaction_results.get("final_llm_response", "") 
+            
+            for asr_ui_update in interaction_results.get("asr_ui_updates", []):
+                yield AdditionalOutputs(json.dumps({"type": "transcript", "data": asr_ui_update}))
+
+            for tts_audio_item in interaction_results.get("tts_audio_items", []):
+                yield tts_audio_item
+            
+            if full_response: 
+                logging.info(f"Final LLM for {input_data.webrtc_id}: '{full_response[:100]}...'")
+                
+                user_input_for_mem0 = final_asr_prompt 
+                if user_input_for_mem0: 
+                    mem0_config = get_user_mem0_config(input_data.webrtc_id)
+                    memory_client = AsyncMemoryClient(api_key=mem0_config["api_key"])
+                    # Mem0 expects a list of {"role": str, "content": str}
+                    # We use final_asr_prompt (original user) and full_response (model)
+                    conversation_to_save_for_mem0 = [
+                        {"role": "user", "content": user_input_for_mem0}, 
+                        {"role": "assistant", "content": full_response} 
+                    ]
+                    run_async(memory_client.add(conversation_to_save_for_mem0, user_id=user_id))
+                    logging.info(f"Saved conversation to Mem0 for {input_data.webrtc_id} (User: '{user_input_for_mem0[:50]}...', Assistant: '{full_response[:50]}...')")
+
+            if full_response: 
+                try:
+                    openai_planning_client = get_user_openai_client(input_data.webrtc_id) 
+                    # ActionPlanner expects history in OpenAI format.
+                    # session["messages"] is now in Google API format.
+                    # We need to adapt this or ActionPlanner. For now, just trim.
+                    action_planner_history = trim_conversation_history(session["messages"], 5)
+                    # Potentially convert action_planner_history to OpenAI format if ActionPlanner requires it strictly.
+                    # For now, assume ActionPlanner can handle it or is adapted.
+                    action_planner = ActionPlanner(conversation_history=action_planner_history) 
+                    next_action_plan = run_async(action_planner.plan_next_action, openai_planning_client)
+                    session["next_action"] = next_action_plan
+                    logging.info(f"Next action plan for {input_data.webrtc_id}: {next_action_plan}")
+                    yield AdditionalOutputs(json.dumps({"type": "next_action", "data": next_action_plan}))
+                except Exception as e:
+                    logging.error(f"ActionPlanner failed for {input_data.webrtc_id}: {e}")
+                    session["next_action"] = "share_memory" 
+        
+        logging.info(f"Total interaction time for {input_data.webrtc_id}: {time.time() - start_time:.2f}s")
+
     except Exception as e:
-        logging.error(f"规划下一步行动失败: {str(e)}")
-        session["next_action"] = "share_memory"  # 失败时默认为分享记忆
+        logging.error(f"Error during unified Google Live session for {input_data.webrtc_id}: {type(e).__name__} - {e}")
+    finally:
+        if gemini_client: 
+            run_async(gemini_client.close())
+            logging.info(f"Unified GoogleLiveClient closed for {input_data.webrtc_id}.")
 
 # 创建一个包装函数来接收来自Stream的webrtc_id参数
 def startup_wrapper(*args):
@@ -439,52 +660,91 @@ app.add_middleware(
 )
 
 # 配置更新处理函数（用于处理用户配置更新）
-def handle_config_update(webrtc_id, message, data):
-    if message == "config_updated" and isinstance(data, InputData):
-        logging.info(f"用户 {webrtc_id} 配置已更新")
+def handle_config_update(webrtc_id: str, message: str, data: InputData): # Added type hints
+    # data is an InputData instance, already updated in user_configs by routes.py
+    if message == "config_updated": 
+        logging.info(f"用户 {webrtc_id} 配置已更新: {data.model_dump_json(exclude_none=True, exclude={'frame_data'})}") # Log relevant parts of data
         
-        # 如果用户之前有会话，则更新会话信息
+        # 1. Update session-specific information (prompts, languages) if the user has an active session
         if webrtc_id in user_sessions:
             session = user_sessions[webrtc_id]
             
-            # 更新用户会话的配置
-            if data.voice_output_language:
+            # Update session settings from InputData if new values are provided
+            if data.voice_output_language is not None:
                 session["voice_output_language"] = data.voice_output_language
-            if data.text_output_language:
+            if data.text_output_language is not None:
                 session["text_output_language"] = data.text_output_language
-            if data.system_prompt:
-                session["system_prompt"] = data.system_prompt
-            if data.user_name:
+            if data.system_prompt is not None:
+                session["raw_system_prompt"] = data.system_prompt # Store new raw system prompt
+            if data.user_name is not None:
                 session["user_name"] = data.user_name
-                
-            # 更新是否相同语言
+            
             session["is_same_language"] = (session["voice_output_language"] == session["text_output_language"])
             
-            # 重新生成系统提示
-            sys_prompt = generate_sys_prompt(
+            # Regenerate system prompt as it might depend on the updated session settings or AI model
+            # get_user_ai_model() will use the 'data' (latest config) to determine the model
+            current_sys_prompt = generate_sys_prompt(
                 voice_output_language=session["voice_output_language"],
                 text_output_language=session["text_output_language"],
                 is_same_language=session["is_same_language"],
                 current_user_name=session["user_name"],
                 system_prompt=session["system_prompt"],
-                model=get_user_ai_model(webrtc_id)
+                model=get_user_ai_model(webrtc_id) 
             )
             
-            # 更新消息列表中的系统提示
-            if len(session["messages"]) > 0 and session["messages"][0]["role"] == "system":
-                session["messages"][0]["content"] = sys_prompt
+            if session["messages"] and session["messages"][0]["role"] == "system":
+                session["messages"][0]["content"] = current_sys_prompt
             else:
-                session["messages"].insert(0, {"role": "system", "content": sys_prompt})
-        
-        # 如果用户有OpenAI客户端，则根据新配置更新客户端
-        if webrtc_id in openai_clients and (data.llm_api_key or data.llm_base_url):
-            api_key = data.llm_api_key if data.llm_api_key else DEFAULT_LLM_API_KEY
-            base_url = data.llm_base_url if data.llm_base_url else DEFAULT_LLM_BASE_URL
+                session["messages"].insert(0, {"role": "system", "content": current_sys_prompt})
+            logging.info(f"Session for {webrtc_id} updated with new system prompt and settings.")
+
+        # 2. Update OpenAI client if LLM API key or base URL changed
+        # The google_gemini_api_key is accessed via get_user_gemini_config(), not directly used for this OpenAI client.
+        if webrtc_id in openai_clients:
+            current_client = openai_clients[webrtc_id]
             
-            openai_clients[webrtc_id] = OpenAI(
-                api_key=api_key,
-                base_url=base_url
-            )
+            # Determine the effective API key: use data if provided, else current client's, else default
+            effective_api_key = DEFAULT_LLM_API_KEY # Start with global default
+            if hasattr(current_client, 'api_key') and current_client.api_key:
+                effective_api_key = current_client.api_key # Use current client's if exists
+            if data.llm_api_key is not None: # Override with new data if provided
+                effective_api_key = data.llm_api_key
+
+            # Determine the effective base URL: use data if provided, else current client's, else default
+            effective_base_url = DEFAULT_LLM_BASE_URL # Start with global default
+            if hasattr(current_client, 'base_url') and current_client.base_url:
+                client_base_url_str = str(current_client.base_url)
+                if client_base_url_str != "None": # Check against str(None)
+                    effective_base_url = client_base_url_str # Use current client's if exists and not None
+            if data.llm_base_url is not None: # Override with new data if provided
+                effective_base_url = data.llm_base_url
+            
+            # Re-initialize the client only if the effective settings are different from current client's,
+            # or if an explicit update was provided via 'data'.
+            # This avoids re-creating the client unnecessarily if settings remain the same.
+            needs_update = False
+            if not hasattr(current_client, 'api_key') or current_client.api_key != effective_api_key:
+                needs_update = True
+            if not hasattr(current_client, 'base_url') or str(current_client.base_url) != effective_base_url:
+                needs_update = True
+            
+            if data.llm_api_key is not None or data.llm_base_url is not None: # Explicit intent to update
+                needs_update = True
+
+            if needs_update:
+                openai_clients[webrtc_id] = OpenAI(
+                    api_key=effective_api_key,
+                    base_url=effective_base_url
+                )
+                logging.info(f"OpenAI client for {webrtc_id} re-initialized/updated.")
+        elif data.llm_api_key is not None or data.llm_base_url is not None:
+            # If client doesn't exist but keys are provided, create it.
+            # This case might be covered by get_user_openai_client, but good to be robust.
+             openai_clients[webrtc_id] = OpenAI(
+                    api_key=data.llm_api_key if data.llm_api_key is not None else DEFAULT_LLM_API_KEY,
+                    base_url=data.llm_base_url if data.llm_base_url is not None else DEFAULT_LLM_BASE_URL
+                )
+             logging.info(f"New OpenAI client for {webrtc_id} created due to config update.")
 
 # 初始化路由器，传递配置处理函数
 init_router(stream, rtc_configuration, handle_config_update)

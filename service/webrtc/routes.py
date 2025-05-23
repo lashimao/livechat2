@@ -15,6 +15,9 @@ class InputData(BaseModel):
     llm_api_key: Optional[str] = None
     whisper_api_key: Optional[str] = None
     siliconflow_api_key: Optional[str] = None
+    google_gemini_api_key: Optional[str] = None
+    live_api_model_name: Optional[str] = None # For Google Live API model
+    live_api_voice_name: Optional[str] = None # For Google Live API TTS voice
     llm_base_url: Optional[str] = None
     whisper_base_url: Optional[str] = None
     whisper_model: Optional[str] = None  # 添加ASR模型字段

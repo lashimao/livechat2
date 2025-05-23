@@ -13,105 +13,40 @@ from openai import OpenAI
 # 加载环境变量
 load_dotenv()
 
-# 从环境变量获取默认 API 密钥和基础 URL
-DEFAULT_OPENAI_API_KEY = os.getenv("LLM_API_KEY", "")
-DEFAULT_OPENAI_API_BASE_URL = os.getenv("LLM_BASE_URL", "")
 
-async def predict_emotion(message, client=None):
+# 从环境变量获取默认 API 密钥和基础 URL
+# DEFAULT_OPENAI_API_KEY = os.getenv("LLM_API_KEY", "") # No longer needed for local version
+# DEFAULT_OPENAI_API_BASE_URL = os.getenv("LLM_BASE_URL", "") # No longer needed for local version
+
+def predict_emotion(text_to_analyze: str) -> str: # Made synchronous, client param removed
     """
-    根据给定的消息文本预测情感
+    Predicts emotion based on the input text using simple rules.
+    This is a simplified local version for function calling integration.
     
-    参数:
-        message (str): 用于情感分析的消息文本
-        client (OpenAI, optional): OpenAI 客户端，如不指定则创建新的客户端
+    Args:
+        text_to_analyze (str): The text to analyze for emotion.
         
-    返回:
-        str: 预测的情感类型，如'neutral'、'anger'、'joy'等
+    Returns:
+        str: Predicted emotion string.
     """
-    try:
-        api_key = DEFAULT_OPENAI_API_KEY
-        base_url = DEFAULT_OPENAI_API_BASE_URL
-        
-        # 准备请求数据
-        data = {
-            "model": "gpt-4o-mini-2024-07-18",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": "你现在是一个虚拟形象的动作驱动器，你需要根据输入的虚拟形象的语言，驱动虚拟形象的动作和表情，请尽量输出得随机并丰富一些"
-                },
-                {
-                    "role": "user",
-                    "content": message
-                }
-            ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "motion_response",
-                    "strict": True,
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "result": {
-                                "type": "string",
-                                "enum": ["neutral", "anger", "joy", "sadness", "shy", "shy2", "smile1", "smile2", "unhappy"]
-                            }
-                        },
-                        "required": ["result"],
-                        "additionalProperties": False
-                    }
-                }
-            }
-        }
-        
-        # 如果提供了客户端，直接使用客户端
-        if client:
-            try:
-                response = client.chat.completions.create(**data)
-                content = response.choices[0].message.content
-                try:
-                    parsed_content = json.loads(content)
-                    emotion = parsed_content.get('result', 'neutral')
-                    logging.info(f"情感分析结果: {emotion}")
-                    return emotion
-                except json.JSONDecodeError:
-                    logging.error(f"无法解析JSON响应: {content}")
-                    return 'neutral'
-            except Exception as e:
-                logging.error(f"客户端调用失败: {e}")
-                # 如果客户端调用失败，回退到HTTP请求
-        
-        # 使用aiohttp进行异步HTTP请求
-        headers = {
-            'Content-Type': 'application/json',
-            'Authorization': f'Bearer {api_key}'
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{base_url}/chat/completions",
-                headers=headers,
-                json=data
-            ) as response:
-                # 检查响应状态
-                if response.status == 200:
-                    response_data = await response.json()
-                    content = response_data.get('choices', [{}])[0].get('message', {}).get('content', '{}')
-                    
-                    try:
-                        parsed_content = json.loads(content)
-                        emotion = parsed_content.get('result', 'neutral')
-                        logging.info(f"情感分析结果: {emotion}")
-                        return emotion
-                    except json.JSONDecodeError:
-                        logging.error(f"无法解析JSON响应: {content}")
-                        return 'neutral'
-                else:
-                    response_text = await response.text()
-                    logging.error(f"API请求失败: {response.status} {response_text}")
-                    return 'neutral'
-            
-    except Exception as e:
-        logging.error(f"预测情感时出错: {e}")
-        return 'neutral' 
+    logging.info(f"Predicting emotion locally for: {text_to_analyze[:50]}...")
+    text_lower = text_to_analyze.lower()
+    
+    # Simple rule-based emotion detection
+    if "!" in text_to_analyze or "surprise" in text_lower or "wow" in text_lower:
+        emotion = "surprised" # Assuming "surprised" is a valid enum for your avatar
+    elif "?" in text_to_analyze or "hmm" in text_lower or "wonder" in text_lower:
+        emotion = "thinking" # Assuming "thinking" is a valid enum
+    elif "sad" in text_lower or "cry" in text_lower or "sorry" in text_lower and "not" not in text_lower :
+        emotion = "sadness"
+    elif "happy" in text_lower or "joy" in text_lower or "great" in text_lower or "wonderful" in text_lower:
+        emotion = "joy"
+    elif "angry" in text_lower or "hate" in text_lower:
+        emotion = "anger"
+    elif "shy" in text_lower or "blush" in text_lower:
+        emotion = "shy" # Example, replace with actual valid emotion strings for your avatar
+    else:
+        emotion = "neutral" # Default emotion
+
+    logging.info(f"Locally predicted emotion: {emotion}")
+    return emotion

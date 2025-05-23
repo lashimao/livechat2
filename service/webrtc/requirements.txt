@@ -8,3 +8,4 @@ twilio
 mem0ai
 litellm
 humaware-vad
+websockets
