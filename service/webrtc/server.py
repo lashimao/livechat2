@@ -17,12 +17,12 @@ import wave # For PCM audio handling
 
 import google.generativeai as genai
 import google.generativeai.types as genai_types # For Blob, Part, etc.
-# from google.generativeai.types import Content, Part, Blob # Specific types
+import re # For parsing emotion tags
 
 # Custom utils & routing
 from utils import run_async, generate_sys_prompt, generate_unique_user_id, stream_utils 
 from ai import AI_MODEL # Kept for generate_sys_prompt model parameter
-from ai.emotion import predict_emotion # Import for emotion prediction
+# from ai.emotion import predict_emotion # This will be removed
 from routes import router, init_router, get_user_config, InputData # InputData now has google_api_key, gemini_model_name
 from fastapi.middleware.cors import CORSMiddleware # Already here
 
@@ -36,10 +36,7 @@ DEFAULT_GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 DEFAULT_GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-1.5-pro-latest") # Ensure this model supports Live API
 DEFAULT_AI_MODEL = DEFAULT_GEMINI_MODEL_NAME # For generate_sys_prompt compatibility
 
-# Configuration for Emotion Prediction (OpenAI gpt-4o-mini)
-DEFAULT_EMOTION_OPENAI_API_KEY = os.getenv("EMOTION_OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", "")) # Fallback to general OpenAI key
-DEFAULT_EMOTION_OPENAI_BASE_URL = os.getenv("EMOTION_OPENAI_BASE_URL", os.getenv("OPENAI_API_BASE_URL", "https://api.openai.com/v1"))
-
+# DEFAULT_EMOTION_OPENAI_API_KEY and DEFAULT_EMOTION_OPENAI_BASE_URL are removed as emotion prediction is now via Gemini prompt.
 
 DEFAULT_TIME_LIMIT = int(os.getenv("TIME_LIMIT", "600")) 
 DEFAULT_CONCURRENCY_LIMIT = int(os.getenv("CONCURRENCY_LIMIT", "10")) 

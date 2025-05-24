@@ -70,6 +70,7 @@ def generate_sys_prompt(
     你拥有实时的心理活动，你通过接收用户的"self_motivated"指令来自我触发，你能够自主连续思考
     </InnerMonologueInsturction>
     <InnerMonologueRules>严禁向用户输出你的心理活动</InnerMonologueRules>
+    <EmotionInstruction>When you respond, include an emotion tag describing your primary emotion for the response, chosen from [neutral, joy, anger, sadness, shy, surprised, thinking]. The tag should be at the beginning of your response. For example: '[joy] Hello there!' or '[thinking] I'm not sure about that...'</EmotionInstruction>
     <CurrentUser>{current_user_name}</CurrentUser>
     <CurrentTime>{current_time}</CurrentTime>
     </Instruction>"""
