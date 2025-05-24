@@ -14,29 +14,7 @@
 - ✨ 开发新功能
 - 🎨 改进用户界面
 
-任何形式的贡献都非常欢迎。让我们一起把 Amadeus System 变得更好！
 
-
-#### 部署步骤
-
-1. 点击上方的 "Deploy to Zeabur" 按钮
-2. 如果你还没有 Zeabur 账号，需要先[注册](https://zeabur.com?referralCode=aipoet)。需要花费$5开通Developer计划,可使用WildCard虚拟信用卡开通,也可直接使用支付宝充值余额支付。
-3. 点击上方按钮一键部署到AWS香港区域，等待部署完成，然后如下图，填写环境变量，最后再点击Networking，生成域名，你就可以通过 Zeabur 提供的域名访问你的应用了
-
-
-#### 环境变量配置说明
-
-| 环境变量 | 说明 |
-|---------|------|
-| `VITE_APP_DEFAULT_USERNAME` | 用于前端登录系统的用户名，从而让Amadeus识别你的身份 |
-| `WEBRTC_API_URL` | WEBRTC的服务器API地址，Zeabur模板里已经内置了公共的WEBRTC服务器，你也可以自行参考文档自行搭建 |
-
-注意事项：
-- 确保你的项目符合 Zeabur 的部署要求
-- 如果你需要自定义域名，可以在 Zeabur 的控制面板中进行设置
-- 建议查看 [Zeabur 的官方文档](https://zeabur.com/docs) 获取更多部署相关信息
-
-### 使用 Docker Compose 部署
 
 如果你想在自己的服务器上部署，可以使用 Docker Compose 进行部署。
 
@@ -99,13 +77,8 @@ docker build -t amadeus-webrtc-service .
 ```bash
 docker run -d --name amadeus-webrtc \
   -p 80:80 -p 443:443 -p 3478:3478 -p 5349:5349 -p 49152-65535:49152-65535/udp \
-  -e LLM_API_KEY=你的OpenAI_API密钥 \
-  -e WHISPER_API_KEY=你的Whisper_API密钥 \
-  -e SILICONFLOW_API_KEY=你的硅基流动API密钥 \
-  -e SILICONFLOW_VOICE=你的硅基流动语音ID \
-  -e LLM_BASE_URL=你的大语言模型API的基础URL \
-  -e WHISPER_BASE_URL=你的Whisper API的基础URL \
-  -e WHISPER_MODEL=你的Whisper模型版本 \
+  -e LLM_API_KEY=你的AI_API密钥 \
+
   -e AI_MODEL=你的大语言模型名称 \
   -e MEM0_API_KEY=你的MEM0记忆服务API密钥 \
   -e TIME_LIMIT=你的WebRTC流的最大时间限制(秒) \
@@ -116,20 +89,6 @@ docker run -d --name amadeus-webrtc \
 #### WebRTC服务环境变量说明
 
 以下是WebRTC服务的内置AI服务的环境变量说明，可以用于搭建公共服务：
-
-| 环境变量 | 说明 | 默认值 |
-|---------|------|-------|
-| `LLM_API_KEY` | OpenAI或兼容API的密钥，用于大语言模型服务 | 无 |
-| `WHISPER_API_KEY` | Whisper API密钥，用于语音识别服务 | 无 |
-| `SILICONFLOW_API_KEY` | 硅基流动API密钥，用于语音合成服务 | 无 |
-| `SILICONFLOW_VOICE` | 硅基流动你自定义的语音ID | 无 |
-| `LLM_BASE_URL` | 大语言模型API的基础URL | 无 |
-| `WHISPER_BASE_URL` | Whisper API的基础URL | 无 |
-| `WHISPER_MODEL` | 使用的Whisper模型版本 | 无 |
-| `AI_MODEL` | 使用的大语言模型名称 | 无 |
-| `MEM0_API_KEY` | MEM0记忆服务的API密钥 | 无 |
-| `TIME_LIMIT` | WebRTC流的最大时间限制(秒) | 600 |
-| `CONCURRENCY_LIMIT` | 最大并发连接数 | 10 |
 
 #### 端口配置要求
 
