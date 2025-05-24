@@ -14,27 +14,31 @@ from openai import OpenAI
 load_dotenv()
 
 # 从环境变量获取默认 API 密钥和基础 URL
-DEFAULT_OPENAI_API_KEY = os.getenv("LLM_API_KEY", "")
-DEFAULT_OPENAI_API_BASE_URL = os.getenv("LLM_BASE_URL", "")
+# Use specific env vars for emotion prediction to decouple from main LLM config
+DEFAULT_EMOTION_OPENAI_API_KEY = os.getenv("EMOTION_OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", "")) # Fallback to general OPENAI_API_KEY
+DEFAULT_EMOTION_OPENAI_BASE_URL = os.getenv("EMOTION_OPENAI_BASE_URL", os.getenv("OPENAI_API_BASE_URL", "https://api.openai.com/v1")) # Fallback to general OpenAI base
 
-async def predict_emotion(message, client=None):
+async def predict_emotion(message: str) -> str: # Removed client parameter
     """
     根据给定的消息文本预测情感
     
     参数:
         message (str): 用于情感分析的消息文本
-        client (OpenAI, optional): OpenAI 客户端，如不指定则创建新的客户端
         
     返回:
         str: 预测的情感类型，如'neutral'、'anger'、'joy'等
     """
     try:
-        api_key = DEFAULT_OPENAI_API_KEY
-        base_url = DEFAULT_OPENAI_API_BASE_URL
+        api_key = DEFAULT_EMOTION_OPENAI_API_KEY
+        base_url = DEFAULT_EMOTION_OPENAI_BASE_URL
+
+        if not api_key:
+            logging.warning("EMOTION_OPENAI_API_KEY not set. Emotion prediction will be skipped.")
+            return 'neutral'
         
         # 准备请求数据
         data = {
-            "model": "gpt-4o-mini-2024-07-18",
+            "model": "gpt-4o-mini", # Using the model name as per task description
             "messages": [
                 {
                     "role": "system",
@@ -65,32 +69,26 @@ async def predict_emotion(message, client=None):
             }
         }
         
-        # 如果提供了客户端，直接使用客户端
-        if client:
-            try:
-                response = client.chat.completions.create(**data)
-                content = response.choices[0].message.content
-                try:
-                    parsed_content = json.loads(content)
-                    emotion = parsed_content.get('result', 'neutral')
-                    logging.info(f"情感分析结果: {emotion}")
-                    return emotion
-                except json.JSONDecodeError:
-                    logging.error(f"无法解析JSON响应: {content}")
-                    return 'neutral'
-            except Exception as e:
-                logging.error(f"客户端调用失败: {e}")
-                # 如果客户端调用失败，回退到HTTP请求
-        
-        # 使用aiohttp进行异步HTTP请求
+        # Always create a new client for this specific call, or use aiohttp if preferred.
+        # For simplicity and to align with original structure's fallback, let's use aiohttp directly.
+        # This avoids managing a separate OpenAI client instance in server.py for this one function.
+
         headers = {
             'Content-Type': 'application/json',
             'Authorization': f'Bearer {api_key}'
         }
         
+        # Construct the endpoint URL, ensuring no double slashes if base_url already ends with /v1
+        endpoint_url = f"{base_url.rstrip('/')}/chat/completions"
+        if not base_url.endswith("/v1") and not base_url.endswith("/v1/"): # common issue
+             if "/chat/completions" not in base_url: # if it's just base, add /v1
+                 endpoint_url = f"{base_url.rstrip('/')}/v1/chat/completions"
+
+
+        logging.info(f"Sending emotion prediction request to: {endpoint_url} with model {data['model']}")
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                f"{base_url}/chat/completions",
+                endpoint_url,
                 headers=headers,
                 json=data
             ) as response:

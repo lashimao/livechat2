@@ -12,20 +12,14 @@ from fastrtc import ReplyOnPause
 # 添加一个数据模型来接收前端传入的配置
 class InputData(BaseModel):
     webrtc_id: str
-    llm_api_key: Optional[str] = None
-    whisper_api_key: Optional[str] = None
-    siliconflow_api_key: Optional[str] = None
-    llm_base_url: Optional[str] = None
-    whisper_base_url: Optional[str] = None
-    whisper_model: Optional[str] = None  # 添加ASR模型字段
-    siliconflow_voice: Optional[str] = None
-    ai_model: Optional[str] = None
+    google_api_key: Optional[str] = None  # New Google API Key
+    gemini_model_name: Optional[str] = None # New Gemini Model Name
+    ai_model: Optional[str] = None # Retained for now, might be mapped to Gemini model or removed later
     voice_output_language: Optional[str] = None
     text_output_language: Optional[str] = None
     system_prompt: Optional[str] = None
     user_name: Optional[str] = None
-    max_context_length: Optional[int] = None
-    mem0_api_key: Optional[str] = None
+    max_context_length: Optional[int] = None # Retained, will be used for context to Live API
     next_action: Optional[str] = None
     is_camera_on: Optional[bool] = False  # 添加摄像头状态字段
 
@@ -43,8 +37,8 @@ class VideoFrameData(BaseModel):
 # 添加用于内置服务的简化数据模型
 class BuiltinServiceRequest(BaseModel):
     webrtc_id: str
-    ai_model: Optional[str] = None
-    whisper_model: Optional[str] = None  # 添加ASR模型字段
+    ai_model: Optional[str] = None # Retained for now
+    gemini_model_name: Optional[str] = None # Added for builtin service
     voice_output_language: Optional[str] = None
     text_output_language: Optional[str] = None
     system_prompt: Optional[str] = None
@@ -157,20 +151,14 @@ async def use_builtin_service(data: BuiltinServiceRequest):
     # 从环境变量中获取配置
     built_in_config = InputData(
         webrtc_id=data.webrtc_id,
-        llm_api_key=os.environ.get("LLM_API_KEY", ""),
-        whisper_api_key=os.environ.get("WHISPER_API_KEY", ""),
-        siliconflow_api_key=os.environ.get("SILICONFLOW_API_KEY", ""),
-        llm_base_url=os.environ.get("LLM_BASE_URL", ""),
-        whisper_base_url=os.environ.get("WHISPER_BASE_URL", ""),
-        whisper_model=data.whisper_model or os.environ.get("WHISPER_MODEL", "whisper-large-v3"),  # 使用ASR模型字段
-        siliconflow_voice=os.environ.get("SILICONFLOW_VOICE", ""),
-        ai_model=data.ai_model or os.environ.get("AI_MODEL", "gpt-4o-mini"),
+        google_api_key=os.environ.get("GOOGLE_API_KEY", ""), # Updated to Google API Key
+        gemini_model_name=data.gemini_model_name or os.environ.get("GEMINI_MODEL_NAME", "gemini/gemini-1.5-pro-latest"), # Updated to Gemini Model
+        ai_model=data.ai_model or os.environ.get("AI_MODEL", "gemini/gemini-1.5-pro-latest"), # Defaulting to a gemini model
         voice_output_language=data.voice_output_language or os.environ.get("VOICE_OUTPUT_LANGUAGE", "zh"),
         text_output_language=data.text_output_language or os.environ.get("TEXT_OUTPUT_LANGUAGE", "zh"),
         system_prompt=data.system_prompt or os.environ.get("SYSTEM_PROMPT", ""),
         user_name=data.user_name or os.environ.get("USER_NAME", ""),
         max_context_length=data.max_context_length or os.environ.get("MAX_CONTEXT_LENGTH", 20),
-        mem0_api_key=os.environ.get("MEM0_API_KEY", ""),
         is_camera_on=is_camera_on  # 保留原有的摄像头状态
     )
     
