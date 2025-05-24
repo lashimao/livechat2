@@ -1,504 +1,389 @@
-# 导入必要的库和模块
-import fastapi  # 用于创建Web API服务
-from fastapi.responses import FileResponse  # 用于返回文件响应
-from fastrtc import ReplyOnPause, Stream, AdditionalOutputs, audio_to_bytes  # 用于处理WebRTC流
-import logging  # 用于记录日志
-import time  # 用于计时和时间相关操作
-import gradio as gr
-from fastapi.middleware.cors import CORSMiddleware  # 用于处理跨域请求
-import numpy as np  # 用于数值计算和数组操作
-import io  # 用于处理输入输出流
-import requests  # 用于发送HTTP请求
-import asyncio  # 用于异步编程
-from mem0 import AsyncMemoryClient
-import os  # 用于操作系统相关功能
-from io import BytesIO  # 用于在内存中处理二进制数据
-from dotenv import load_dotenv  # 用于加载环境变量
-import aiohttp  # 用于异步HTTP请求
-import json  # 用于JSON处理
+import fastapi 
+# from fastapi.responses import FileResponse # Keep for potential future use, but not for main flow
+from fastrtc import ReplyOnPause, Stream, AdditionalOutputs # audio_to_bytes might be replaced or adapted if it was OGG specific
+import logging
+# import time # Keep for logging if needed
+import numpy as np
+import asyncio
+import os
+# from io import BytesIO # Keep for potential use with audio bytes
+from dotenv import load_dotenv
+import json
 from datetime import datetime, timedelta
-from typing import Dict, Optional
-from openai import OpenAI
-# 导入自定义的工具函数
-from utils import run_async, generate_sys_prompt, process_llm_stream, generate_unique_user_id
-from ai import ai_stream, AI_MODEL, predict_emotion  # 从ai模块导入
-from ai.plan import ActionPlanner  # 导入ActionPlanner类
-from stt import transcribe
-from tts import text_to_speech_stream
-from routes import router, init_router, get_user_config, InputData  # 导入路由模块及用户配置
+from typing import Dict, Optional, List, Any, Tuple, Union, TypedDict, Literal, AsyncGenerator # Added more types
 from contextlib import asynccontextmanager
+import base64
+import wave # For PCM audio handling
 
-# 加载默认环境变量（作为备用）
-load_dotenv()
+import google.generativeai as genai
+import google.generativeai.types as genai_types # For Blob, Part, etc.
+# from google.generativeai.types import Content, Part, Blob # Specific types
 
-from humaware_vad import HumAwareVADModel
-vad_model = HumAwareVADModel()
+# Custom utils & routing
+from utils import run_async, generate_sys_prompt, generate_unique_user_id, stream_utils 
+from ai import AI_MODEL # Kept for generate_sys_prompt model parameter
+from ai.emotion import predict_emotion # Import for emotion prediction
+from routes import router, init_router, get_user_config, InputData # InputData now has google_api_key, gemini_model_name
+from fastapi.middleware.cors import CORSMiddleware # Already here
 
-# 获取默认环境变量
-DEFAULT_LLM_API_KEY = os.getenv("LLM_API_KEY", "")
-DEFAULT_WHISPER_API_KEY = os.getenv("WHISPER_API_KEY", "")
-DEFAULT_SILICONFLOW_API_KEY = os.getenv("SILICONFLOW_API_KEY", "")
-DEFAULT_LLM_BASE_URL = os.getenv("LLM_BASE_URL", "https://api.ephone.ai/v1")
-DEFAULT_WHISPER_BASE_URL = os.getenv("WHISPER_BASE_URL", "https://amadeus-ai-api-2.zeabur.app/v1")
-DEFAULT_AI_MODEL = os.getenv("AI_MODEL")
-DEFAULT_WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-large-v3")
-DEFAULT_MEM0_API_KEY = os.getenv("MEM0_API_KEY", "")
-# 添加WebRTC流的时间限制和并发限制环境变量
-DEFAULT_TIME_LIMIT = int(os.getenv("TIME_LIMIT", "600"))
-DEFAULT_CONCURRENCY_LIMIT = int(os.getenv("CONCURRENCY_LIMIT", "10"))
+load_dotenv() # Already here
 
-# 设置默认的语言选项和参数
-DEFAULT_VOICE_OUTPUT_LANGUAGE = 'ja'
-DEFAULT_TEXT_OUTPUT_LANGUAGE = 'zh'
+from humaware_vad import HumAwareVADModel # VAD model for detecting speech pauses
+vad_model = HumAwareVADModel() # Already here
+
+# Default environment variables & constants
+DEFAULT_GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "") 
+DEFAULT_GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL_NAME", "gemini-1.5-pro-latest") # Ensure this model supports Live API
+DEFAULT_AI_MODEL = DEFAULT_GEMINI_MODEL_NAME # For generate_sys_prompt compatibility
+
+# Configuration for Emotion Prediction (OpenAI gpt-4o-mini)
+DEFAULT_EMOTION_OPENAI_API_KEY = os.getenv("EMOTION_OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", "")) # Fallback to general OpenAI key
+DEFAULT_EMOTION_OPENAI_BASE_URL = os.getenv("EMOTION_OPENAI_BASE_URL", os.getenv("OPENAI_API_BASE_URL", "https://api.openai.com/v1"))
+
+
+DEFAULT_TIME_LIMIT = int(os.getenv("TIME_LIMIT", "600")) 
+DEFAULT_CONCURRENCY_LIMIT = int(os.getenv("CONCURRENCY_LIMIT", "10")) 
+
+DEFAULT_VOICE_OUTPUT_LANGUAGE = 'ja' 
+DEFAULT_TEXT_OUTPUT_LANGUAGE = 'zh'  
 DEFAULT_SYSTEM_PROMPT = """命运石之门(steins gate)的牧濑红莉栖(kurisu),一个天才少女,性格傲娇,不喜欢被叫克里斯蒂娜"""
 DEFAULT_USER_NAME = "用户"
-# 会话超时设置
 SESSION_TIMEOUT = timedelta(seconds=DEFAULT_TIME_LIMIT)
-# 清理间隔
-CLEANUP_INTERVAL = 60
+CLEANUP_INTERVAL = 60 
 
-# 用户会话状态字典，存储每个用户的消息、设置等
-user_sessions = {}
-# 用户会话最后活动时间
-user_sessions_last_active = {}
+user_sessions: Dict[str, Dict[str, Any]] = {} 
+user_sessions_last_active: Dict[str, float] = {} 
+# Store the actual Live API session objects from google.generativeai
+active_live_sessions: Dict[str, genai_types.ChatSession] = {} # Using official SDK's session type
 
-# 初始化OpenAI客户端字典，为每个用户创建一个客户端
-openai_clients = {}
+# Configure the genai client globally with API key for Gemini
+if DEFAULT_GOOGLE_API_KEY: # This is for Gemini
+    genai.configure(api_key=DEFAULT_GOOGLE_API_KEY)
+    logging.info("Google Generative AI client configured with API key for Gemini.")
+else:
+    logging.warning("GOOGLE_API_KEY not found in environment for Gemini. Live API calls may fail.")
 
-# 异步清理过期会话
+# Global client instance (optional, methods can be called directly on genai module after configure)
+# client = genai.Client() # Not strictly necessary for aio.live.connect if genai is configured
+
+def audio_numpy_to_pcm_bytes(audio_np: np.ndarray, input_sample_rate: int, target_sample_rate: int = 16000) -> bytes:
+    if not isinstance(audio_np, np.ndarray): # Should not happen with fastRTC
+        logging.error(f"audio_numpy_to_pcm_bytes: Expected numpy array, got {type(audio_np)}")
+        return b''
+    if audio_np.size == 0: # Handle empty audio input after potential resampling
+        return b''
+            
+    return audio_np.tobytes()
+
 async def cleanup_expired_sessions():
     while True:
         try:
             await asyncio.sleep(CLEANUP_INTERVAL)
             current_time = time.time()
-            expired_sessions = []
-            
-            # 查找过期会话
-            for webrtc_id, last_active in user_sessions_last_active.items():
-                if current_time - last_active > SESSION_TIMEOUT.total_seconds():
-                    expired_sessions.append(webrtc_id)
-            
-            # 清理过期会话
-            for webrtc_id in expired_sessions:
-                logging.info(f"清理过期会话: {webrtc_id}")
+            expired_ids = [
+                webrtc_id for webrtc_id, last_active in list(user_sessions_last_active.items())
+                if current_time - last_active > SESSION_TIMEOUT.total_seconds()
+            ]
+            for webrtc_id in expired_ids:
+                logging.info(f"清理过期用户会话: {webrtc_id}")
                 user_sessions.pop(webrtc_id, None)
                 user_sessions_last_active.pop(webrtc_id, None)
-                openai_clients.pop(webrtc_id, None)
-                
-            logging.info(f"清理完成，当前活跃会话数: {len(user_sessions)}")
+                if webrtc_id in active_live_sessions:
+                    logging.info(f"关闭并清理过期Live API会话: {webrtc_id}")
+                    try:
+                        # The official SDK session from aio.live.connect() might not have a close_async or close method.
+                        # Typically, these sessions are managed by context managers or are implicitly closed when out of scope
+                        # or when the underlying connection is severed.
+                        # For now, just removing from our tracking dict. The connection might time out on server side.
+                        # If a close method becomes available, it should be used here.
+                        # await active_live_sessions[webrtc_id].close() # Or close_async()
+                        logging.info(f"Live API session for {webrtc_id} removed from active pool. Actual closing depends on SDK behavior.")
+                    except Exception as e: # Catch any error during hypothetical close
+                        logging.error(f"关闭Live API会话时出错 for {webrtc_id}: {e}")
+                    del active_live_sessions[webrtc_id]
+            logging.info(f"清理完成，当前活跃用户会话数: {len(user_sessions)}, 当前活跃Live API会话数: {len(active_live_sessions)}")
         except Exception as e:
             logging.error(f"清理过期会话时出错: {e}")
 
-# 获取用户特定的会话状态
-def get_user_session(webrtc_id: str):
-    # 更新用户最后活动时间
+def get_user_session(webrtc_id: str) -> Dict[str, Any]: 
     user_sessions_last_active[webrtc_id] = time.time()
-    
     if webrtc_id not in user_sessions:
-        # 创建新用户的初始会话状态
-        config = get_user_config(webrtc_id)
-        voice_output_language = config.voice_output_language if config and config.voice_output_language else DEFAULT_VOICE_OUTPUT_LANGUAGE
-        text_output_language = config.text_output_language if config and config.text_output_language else DEFAULT_TEXT_OUTPUT_LANGUAGE
-        system_prompt = config.system_prompt if config and config.system_prompt else DEFAULT_SYSTEM_PROMPT
+        config = get_user_config(webrtc_id) 
+        sys_prompt_template = config.system_prompt if config and config.system_prompt else DEFAULT_SYSTEM_PROMPT
         user_name = config.user_name if config and config.user_name else DEFAULT_USER_NAME
-        
-        # 生成系统提示词
-        sys_prompt = generate_sys_prompt(
-            voice_output_language=voice_output_language,
-            text_output_language=text_output_language,
-            is_same_language=(voice_output_language == text_output_language),
+        model_name = config.gemini_model_name if config and config.gemini_model_name else DEFAULT_GEMINI_MODEL_NAME
+
+        sys_prompt_content = generate_sys_prompt(
+            voice_output_language=config.voice_output_language if config and config.voice_output_language else DEFAULT_VOICE_OUTPUT_LANGUAGE,
+            text_output_language=config.text_output_language if config and config.text_output_language else DEFAULT_TEXT_OUTPUT_LANGUAGE,
+            is_same_language=( (config.voice_output_language if config else None) == (config.text_output_language if config else None) ),
             current_user_name=user_name,
-            system_prompt=system_prompt,
-            model=get_user_ai_model(webrtc_id)
+            system_prompt=sys_prompt_template, 
+            model=model_name 
         )
-        
-        # 创建初始消息列表
         user_sessions[webrtc_id] = {
-            "messages": [{"role": "system", "content": sys_prompt}],
-            "voice_output_language": voice_output_language,
-            "text_output_language": text_output_language,
-            "system_prompt": system_prompt,
+            "system_prompt_content": sys_prompt_content,
+            "voice_output_language": config.voice_output_language if config else DEFAULT_VOICE_OUTPUT_LANGUAGE,
+            "text_output_language": config.text_output_language if config else DEFAULT_TEXT_OUTPUT_LANGUAGE,
+            "system_prompt_template": sys_prompt_template, 
             "user_name": user_name,
-            "is_same_language": (voice_output_language == text_output_language),
-            "next_action": None  # 添加next_action字段，用于存储下一步行动计划
+            "next_action": None, 
+            # "last_live_api_handle" - The official SDK might not use explicit handles this way. Context is part of the session.
+            "conversation_history": [genai_types.Content(role="system", parts=[genai_types.Part(text=sys_prompt_content)])]
         }
     
-    return user_sessions[webrtc_id]
-
-# 获取用户的OpenAI客户端
-def get_user_openai_client(webrtc_id: str):
-    # 更新用户最后活动时间
-    user_sessions_last_active[webrtc_id] = time.time()
-    
-    if webrtc_id not in openai_clients:
-        config = get_user_config(webrtc_id)
-        api_key = config.llm_api_key if config and config.llm_api_key else DEFAULT_LLM_API_KEY
-        base_url = config.llm_base_url if config and config.llm_base_url else DEFAULT_LLM_BASE_URL   
-        openai_clients[webrtc_id] = OpenAI(
-            api_key=api_key,
-            base_url=base_url
+    session = user_sessions[webrtc_id]
+    session.setdefault("conversation_history", [genai_types.Content(role="system", parts=[genai_types.Part(text=session.get("system_prompt_content", ""))])])
+    if "system_prompt" in session and "system_prompt_template" not in session : 
+        session["system_prompt_template"] = session.pop("system_prompt")
+    session.setdefault("system_prompt_template", DEFAULT_SYSTEM_PROMPT)
+    if "system_prompt_content" not in session: 
+        model_name_for_prompt = get_user_ai_model(webrtc_id)
+        session["system_prompt_content"] = generate_sys_prompt(
+            voice_output_language=session.get("voice_output_language", DEFAULT_VOICE_OUTPUT_LANGUAGE),
+            text_output_language=session.get("text_output_language", DEFAULT_TEXT_OUTPUT_LANGUAGE),
+            is_same_language=session.get("is_same_language", True),
+            current_user_name=session.get("user_name", DEFAULT_USER_NAME),
+            system_prompt=session["system_prompt_template"],
+            model=model_name_for_prompt
         )
-    return openai_clients[webrtc_id]
+    return session
 
-# 获取用户的AI模型
-def get_user_ai_model(webrtc_id: str):
-    config = get_user_config(webrtc_id)
-    return config.ai_model if config and config.ai_model else DEFAULT_AI_MODEL
+# Renamed to reflect it's using the official google.generativeai Live API
+async def get_google_live_session(webrtc_id: str) -> genai_types.ChatSession: # Type hint with official SDK type
+    user_sessions_last_active[webrtc_id] = time.time() 
 
-# 获取用户的语音转文本API配置
-def get_user_whisper_config(webrtc_id: str):
-    config = get_user_config(webrtc_id)
-    return {
-        "api_key": config.whisper_api_key if config and config.whisper_api_key else DEFAULT_WHISPER_API_KEY,
-        "base_url": config.whisper_base_url if config and config.whisper_base_url else DEFAULT_WHISPER_BASE_URL,
-        "model": config.whisper_model if config and config.whisper_model else DEFAULT_WHISPER_MODEL
-    }
+    if webrtc_id in active_live_sessions:
+        return active_live_sessions[webrtc_id]
 
-# 获取用户的文本转语音配置
-def get_user_siliconflow_config(webrtc_id: str):
-    config = get_user_config(webrtc_id)
-    return {
-        "api_key": config.siliconflow_api_key if config and config.siliconflow_api_key else DEFAULT_SILICONFLOW_API_KEY,
-        "voice": config.siliconflow_voice if config and config.siliconflow_voice else None
-    }
+    if not genai.get_api_key(): # Check if API key is configured
+        raise ConnectionError("Google API Key not configured for Generative AI client.")
 
-# 获取用户的MEM0记忆服务配置
-def get_user_mem0_config(webrtc_id: str):
+    user_session_data = get_user_session(webrtc_id) 
+    config_from_fe = get_user_config(webrtc_id) 
+    
+    model_to_use = config_from_fe.gemini_model_name if config_from_fe and config_from_fe.gemini_model_name else DEFAULT_GEMINI_MODEL_NAME
+    user_session_data["model_name_in_use"] = model_to_use 
+
+    # Configuration for the official Live API
+    # The official `client.aio.live.connect` takes these as direct parameters or nested config objects.
+    # Based on `Get_started_LiveAPI.ipynb`, it's direct parameters.
+    try:
+        logging.info(f"Attempting to connect to Google Live API for {webrtc_id} with model {model_to_use}")
+        # The notebook uses client.aio.live.connect()
+        # Assuming global `genai` is configured, we can use `genai.Client().aio.live.connect()`
+        # or if the SDK structure is flat after `import google.generativeai as genai`, it might be `genai.live.connect()`
+        # Let's assume `genai.Client().aio.live.connect()` as per prompt.
+        # If `genai.Client()` needs to be instantiated:
+        client = genai.Client() # This might pick up global config or need specific auth.
+        
+        # History needs to be in genai_types.Content format
+        history_for_api = list(user_session_data["conversation_history"]) # Make a copy
+
+        live_session = await client.aio.live.connect(
+            model=model_to_use,
+            system_instruction=genai_types.Content(role="system", parts=[genai_types.Part(text=user_session_data["system_prompt_content"])]),
+            history=history_for_api if history_for_api else None, # Pass existing history if any
+            input_audio_config=genai_types.AudioConfig(sample_rate_hertz=16000), # PCM is default encoding
+            output_audio_config=genai_types.AudioConfig(sample_rate_hertz=24000), # PCM is default encoding
+            response_modalities=[genai_types.ResponseModality.AUDIO], # Primary output is AUDIO
+            output_audio_transcription_config=genai_types.OutputAudioTranscriptionConfig() # Enable transcription of generated audio
+        )
+        active_live_sessions[webrtc_id] = live_session
+        logging.info(f"Google Live API session established for {webrtc_id}")
+        return live_session
+    except Exception as e:
+        logging.error(f"Failed to connect to Google Live API for {webrtc_id}: {e}")
+        if webrtc_id in active_live_sessions: # Should not be the case if connect failed, but defensive
+            del active_live_sessions[webrtc_id]
+        raise 
+
+def get_user_ai_model(webrtc_id: str) -> str: 
     config = get_user_config(webrtc_id)
-    return {
-        "api_key": config.mem0_api_key if config and config.mem0_api_key else DEFAULT_MEM0_API_KEY
-    }
+    if config and config.gemini_model_name:
+        return config.gemini_model_name
+    # Fallback for older InputData that might have 'ai_model'
+    if config and hasattr(config, 'ai_model') and config.ai_model:
+         return config.ai_model 
+    return DEFAULT_GEMINI_MODEL_NAME
 
 logging.basicConfig(level=logging.INFO)
-rtc_configuration = {
+rtc_configuration = { 
     "iceServers": [
         {
-            "urls": "turn:43.160.205.75:80",
-            "username": "okabe",
-            "credential": "elpsycongroo"
+            "urls": "turn:43.160.205.75:80", 
+            "username": "okabe", 
+            "credential": "elpsycongroo"  
         },
     ]
 }
 
-def start_up(webrtc_id):
-    logging.info(f"用户 {webrtc_id} 开始函数已执行")
-    
-    # 获取用户会话状态
-    session = get_user_session(webrtc_id)
-    logging.info(f"session: {session}")
-    # 生成最新的系统提示词  
-    current_sys_prompt = generate_sys_prompt(
-        voice_output_language=session["voice_output_language"],
-        text_output_language=session["text_output_language"],
-        is_same_language=session["is_same_language"],
-        current_user_name=session["user_name"],
-        system_prompt=session["system_prompt"],
-        model=get_user_ai_model(webrtc_id)
-    )
-    
-    # 创建一个临时消息列表，包含系统提示和一个特定的用户消息
-    temp_messages = [
-        {"role": "system", "content": current_sys_prompt},
-        {"role": "user", "content": "self_motivated"}
-    ]
+async def start_up(webrtc_id: str) -> AsyncGenerator[Union[bytes, AdditionalOutputs], None]:
+    user_session_data = get_user_session(webrtc_id)
+    logging.info(f"用户会话数据 (startup Live API): {user_session_data.get('user_name', 'Unknown User')}")
 
-    logging.info(f"current_sys_prompt: {current_sys_prompt}")
-    
-    # 获取用户相关配置
-    client = get_user_openai_client(webrtc_id)
-    model = get_user_ai_model(webrtc_id)
-    siliconflow_config = get_user_siliconflow_config(webrtc_id)
-    
-    # 生成用户唯一ID
-    user_id = generate_unique_user_id(session["user_name"])
-    
-    # 使用封装的流处理函数
-    welcome_text = ""
-    stream_generator = process_llm_stream(
-        client=client,
-        messages=temp_messages,
-        model=model,
-        siliconflow_config=siliconflow_config,
-        voice_output_language=session["voice_output_language"],
-        text_output_language=session["text_output_language"],
-        is_same_language=session["is_same_language"],
-        run_predict_emotion=run_predict_emotion,
-        ai_stream=ai_stream,
-        text_to_speech_stream=text_to_speech_stream,
-        max_tokens=100,
-        max_context_length=20,
-    )
-    
-    # 处理生成器的输出
-    for item in stream_generator:
-        if isinstance(item, str):
-            welcome_text = item
-        else:
-            yield item
     try:
-        # 创建ActionPlanner实例
-        action_planner = ActionPlanner(conversation_history=session["messages"][-2:])
-        # 异步执行行动计划
-        next_action = run_async(action_planner.plan_next_action, client)
-        # 更新用户会话中的next_action字段
-        session["next_action"] = next_action
-        logging.info(f"初始下一步行动计划: {next_action}")
-        
-        # 通知前端下一步行动计划
-        next_action_json = json.dumps({"type": "next_action", "data": next_action})
-        yield AdditionalOutputs(next_action_json)
-    except Exception as e:
-        logging.error(f"规划初始下一步行动失败: {str(e)}")
-        session["next_action"] = "share_memory"  # 失败时默认为分享记忆
+        live_session = await get_live_gemini_session(webrtc_id)
+        initial_user_content = "self_motivated_greeting" 
+        logging.info(f"为 {webrtc_id} 发送初始自驱动消息给Live API: '{initial_user_content}'")
 
-# 定义一个异步函数来运行predict_emotion
-async def run_predict_emotion(message, client=None):
-    """
-    异步运行predict_emotion函数
-    
-    参数:
-        message (str): 用于情感分析的消息文本
-        client (OpenAI): OpenAI客户端实例，可选
-        
-    返回:
-        str: 预测的情感类型
-    """
-    return await predict_emotion(message, client)
-
-# 定义echo函数，处理音频输入并返回音频输出
-def echo(audio: tuple[int, np.ndarray], message: str, input_data: InputData, next_action = "", video_frames = None):
-    # 获取用户会话状态
-    session = get_user_session(input_data.webrtc_id)
-    whisper_config = get_user_whisper_config(input_data.webrtc_id)
-    logging.info(f"摄像头状态: {input_data.is_camera_on}")
-    
-    # 记录视频帧信息
-    if video_frames and input_data.is_camera_on:
-        num_frames = len(video_frames) if video_frames else 0
-        logging.info(f"接收到 {num_frames} 帧视频数据")
-    
-    prompt = "[AI主动发起对话]next Action: " + next_action
-    user_id = generate_unique_user_id(session["user_name"])
-    if next_action == "":
-        stt_time = time.time()  # 记录开始时间
-        logging.info(f"用户 {input_data.webrtc_id} 正在执行STT")  # 记录日志
-        # 使用工具函数运行异步转录函数，传入配置
-        prompt = run_async(transcribe, audio, whisper_config["api_key"], whisper_config["base_url"], whisper_config["model"])
-        # 生成用户唯一ID
-        if prompt == "":  # 如果转录结果为空
-            logging.info("STT返回空字符串")  # 记录日志
-            return  # 结束函数
-        logging.info(f"STT响应: {prompt}")  # 记录转录结果
-    mem0_config = get_user_mem0_config(input_data.webrtc_id)
-    memory_client = AsyncMemoryClient(api_key=mem0_config["api_key"])
-    search_result = run_async(memory_client.search, query=prompt, user_id=user_id, limit=3)
-    logging.info(f"搜索结果: {search_result}")
-    # 确保从搜索结果中正确获取记忆
-    memories_text = "\n".join(memory["memory"] for memory in search_result)
-    logging.info(f"记忆文本: {memories_text}")
-    final_prompt = f"Relevant Memories/Facts:\n{memories_text}\n\nUser Question: {prompt}"
-    if next_action == "":
-        # 将用户的输入添加到用户消息历史
-        session["messages"].append({"role": "user", "content": final_prompt})
-        # 发送用户语音转文字结果到前端
-        transcript_json = json.dumps({"type": "transcript", "data": f"{prompt}"})
-        yield AdditionalOutputs(transcript_json)
-        # 记录语音识别所用时间
-        logging.info(f"STT耗时 {time.time() - stt_time} 秒")
-    # 记录LLM开始时间
-    llm_time = time.time()
-    # 获取用户的OpenAI客户端和AI模型
-    client = get_user_openai_client(input_data.webrtc_id)
-    model = get_user_ai_model(input_data.webrtc_id)
-    siliconflow_config = get_user_siliconflow_config(input_data.webrtc_id)
-    
-    # 准备消息列表 - 为OpenAI API创建深拷贝，防止修改原始会话历史
-    messages_for_api = session["messages"].copy()
-    
-    # 如果有视频帧且摄像头已开启，添加视频帧到API请求中
-    if video_frames and input_data.is_camera_on and len(video_frames) > 0:
-        logging.info(f"正在将 {len(video_frames)} 帧视频数据传递给OpenAI API")
-        visual_messages = []
-        for frame in video_frames:
-            visual_messages.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/jpeg;base64,{frame['frame_data']}",
-                    "detail": "high"  # 指定高细节级别
-                }
-            })
-        if len(messages_for_api) > 0 and messages_for_api[-1]["role"] == "user":
-            # 如果最后一条是用户消息，将其内容转换为数组格式，添加视频帧
-            last_msg = messages_for_api[-1]
-            text_content = last_msg["content"]
-            last_msg["content"] = [{"type": "text", "text": text_content}] + visual_messages
-        else:
-            # 如果没有用户消息或最后一条不是用户消息，创建一个新的用户消息
-            sys_msg_with_frames = {
-                "role": "user", 
-                "content": [
-                    {"type": "text", "text": "用户提供了以下视频帧用于分析，请根据图像内容提供适当的回复："},
-                    *visual_messages
-                ]
-            }
-            messages_for_api.append(sys_msg_with_frames)
-    
-    # 使用封装的流处理函数
-    full_response = ""
-    stream_generator = process_llm_stream(
-        client=client,
-        messages=messages_for_api,  # 使用可能包含视频帧的消息副本
-        model=model,
-        siliconflow_config=siliconflow_config,
-        voice_output_language=session["voice_output_language"],
-        text_output_language=session["text_output_language"],
-        is_same_language=session["is_same_language"],
-        run_predict_emotion=run_predict_emotion,
-        ai_stream=ai_stream,
-        text_to_speech_stream=text_to_speech_stream,
-        max_context_length=20,
-    )
-    
-    # 处理生成器的输出
-    for item in stream_generator:
-        if isinstance(item, str):
-            full_response = item
-        else:
-            yield item
-
-    # 将助手的响应添加到用户消息历史
-    conversation_messages = [
-        {"role": "user", "content": prompt},
-        {"role": "assistant", "content": full_response}
-    ]
-    session["messages"].append({"role": "assistant", "content": full_response + " "})
-    logging.info(f"LLM响应: {full_response}")  # 记录LLM响应
-    
-    # 保存对话记忆
-    memory_client.add(conversation_messages, user_id=user_id)
-    logging.info(f"LLM耗时 {time.time() - llm_time} 秒")  # 记录LLM所用时间
-    
-    # LLM响应完成后，规划下一步行动
-    try:
-        # 创建ActionPlanner实例
-        action_planner = ActionPlanner(conversation_history=session["messages"][-5:])
-        # 异步执行行动计划
-        next_action = run_async(action_planner.plan_next_action, client)
-        # 更新用户会话中的next_action字段
-        session["next_action"] = next_action
-        logging.info(f"下一步行动计划: {next_action}")
-        
-        # 通知前端下一步行动计划
-        next_action_json = json.dumps({"type": "next_action", "data": next_action})
-        yield AdditionalOutputs(next_action_json)
-    except Exception as e:
-        logging.error(f"规划下一步行动失败: {str(e)}")
-        session["next_action"] = "share_memory"  # 失败时默认为分享记忆
-
-# 创建一个包装函数来接收来自Stream的webrtc_id参数
-def startup_wrapper(*args):
-    logging.info(f"startup_wrapper: {args}")
-    return start_up(args[1].webrtc_id)
-
-# 使用echo函数直接作为回调
-reply_handler = ReplyOnPause(echo,
-    startup_fn=startup_wrapper,
-    can_interrupt=True,
-    model=vad_model
-    )
-
-# 创建Stream对象，用于处理WebRTC流
-stream = Stream(reply_handler, 
-            modality="audio",  # 设置模态为音频
-            rtc_configuration=rtc_configuration,
-            mode="send-receive",  # 设置模式为发送和接收
-            time_limit=DEFAULT_TIME_LIMIT,
-            concurrency_limit=DEFAULT_CONCURRENCY_LIMIT
+        await live_session.send_client_content_async(
+            text=initial_user_content, 
+            turn_complete=True 
         )
+        
+        user_session_data["conversation_history"].append({"role": "user", "parts": [{"text": initial_user_content}]})
 
-# 使用 lifespan 上下文管理器替代 on_event
-@asynccontextmanager
-async def lifespan(app: fastapi.FastAPI):
-    # 启动时执行的代码
-    cleanup_task = asyncio.create_task(cleanup_expired_sessions())
-    yield
-    # 关闭时执行的代码
-    cleanup_task.cancel()
+        welcome_text_parts = []
+        produced_audio_output = False
+
+        async for event in live_session.receive_async(): 
+            event_type = event.get("event_type")
+            if event_type == "TEXT_CHUNK":
+                text_chunk = event.get("text_chunk", "")
+                welcome_text_parts.append(text_chunk)
+                yield AdditionalOutputs(json.dumps({"type": "text_chunk", "data": text_chunk}))
+            elif event_type == "AUDIO_CHUNK": 
+                audio_chunk_bytes = event.get("audio_chunk")
+                if audio_chunk_bytes:
+                    yield audio_chunk_bytes 
+                    produced_audio_output = True
+            elif event_type == "TRANSCRIPT": 
+                 transcript_data = {"type": "transcript", "data": event.get("transcript", ""), "is_final": event.get("is_final", False)}
+                 yield AdditionalOutputs(json.dumps(transcript_data))
+            elif event_type == "TURN_COMPLETE" and event.get("is_final"):
+                if event.get("last_handle"): 
+                    user_session_data["last_live_api_handle"] = event["last_handle"]
+                    logging.info(f"Received last_handle for {webrtc_id} (startup): {event['last_handle']}")
+                break 
+
+        final_welcome_text = "".join(welcome_text_parts)
+        if final_welcome_text:
+            yield AdditionalOutputs(json.dumps({"type": "assistant_message", "data": final_welcome_text}))
+        
+        user_session_data["conversation_history"].append({"role": "model", "parts": [{"text": final_welcome_text, "audio_present": produced_audio_output}]})
+        
+        logging.info(f"Live API 启动响应 for {webrtc_id}: Text='{final_welcome_text if final_welcome_text else '[No text]'}', Audio Produced={produced_audio_output}")
+        
+        user_session_data["next_action"] = "share_memory" 
+        yield AdditionalOutputs(json.dumps({"type": "next_action", "data": user_session_data["next_action"]}))
+
+    except Exception as e:
+        logging.error(f"Live API startup for {webrtc_id} failed: {e}")
+        import traceback
+        logging.error(traceback.format_exc())
+        yield AdditionalOutputs(json.dumps({"type": "error", "data": f"AI Connection Error: {str(e)}"}))
+
+async def echo( 
+    audio: Optional[tuple[int, np.ndarray]], 
+    message: str,  
+    input_data: InputData, 
+    next_action: str = "", 
+    video_frames: Optional[List[Dict[str, Any]]] = None
+) -> AsyncGenerator[Union[bytes, AdditionalOutputs], None]:
+    
+    user_session_data = get_user_session(input_data.webrtc_id)
+    # logging.debug(f"echo Live API: webrtc_id={input_data.webrtc_id}, audio_present={audio is not None}, msg='{message}', next_action='{next_action}'")
+
     try:
-        await cleanup_task
-    except asyncio.CancelledError:
-        logging.info("清理任务已取消")
-
-# 创建FastAPI应用，使用lifespan参数
-app = fastapi.FastAPI(lifespan=lifespan)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# 配置更新处理函数（用于处理用户配置更新）
-def handle_config_update(webrtc_id, message, data):
-    if message == "config_updated" and isinstance(data, InputData):
-        logging.info(f"用户 {webrtc_id} 配置已更新")
+        live_session = await get_live_gemini_session(input_data.webrtc_id)
         
-        # 如果用户之前有会话，则更新会话信息
-        if webrtc_id in user_sessions:
-            session = user_sessions[webrtc_id]
+        if next_action: 
+            logging.info(f"用户 {input_data.webrtc_id} AI触发对话 (Live API): {next_action}")
+            await live_session.send_client_content_async(text=next_action, turn_complete=True)
+            user_session_data["conversation_history"].append({"role": "user", "parts": [{"text": next_action}]})
+
+        elif audio and audio[1].size > 0:
+            sample_rate, audio_np = audio 
+            audio_pcm_16k_bytes = audio_numpy_to_pcm_bytes(audio_np, sample_rate, target_sample_rate=16000)
             
-            # 更新用户会话的配置
-            if data.voice_output_language:
-                session["voice_output_language"] = data.voice_output_language
-            if data.text_output_language:
-                session["text_output_language"] = data.text_output_language
-            if data.system_prompt:
-                session["system_prompt"] = data.system_prompt
-            if data.user_name:
-                session["user_name"] = data.user_name
-                
-            # 更新是否相同语言
-            session["is_same_language"] = (session["voice_output_language"] == session["text_output_language"])
-            
-            # 重新生成系统提示
-            sys_prompt = generate_sys_prompt(
-                voice_output_language=session["voice_output_language"],
-                text_output_language=session["text_output_language"],
-                is_same_language=session["is_same_language"],
-                current_user_name=session["user_name"],
-                system_prompt=session["system_prompt"],
-                model=get_user_ai_model(webrtc_id)
-            )
-            
-            # 更新消息列表中的系统提示
-            if len(session["messages"]) > 0 and session["messages"][0]["role"] == "system":
-                session["messages"][0]["content"] = sys_prompt
+            if audio_pcm_16k_bytes:
+                await live_session.send_realtime_input_async(audio_bytes=audio_pcm_16k_bytes)
+                # logging.debug(f"User {input_data.webrtc_id} sent audio (PCM 16kHz) to Live API, {len(audio_pcm_16k_bytes)} bytes.")
+                # Simplified history update for audio chunks
+                if not user_session_data["conversation_history"] or user_session_data["conversation_history"][-1].get("role") != "user_audio_stream":
+                    user_session_data["conversation_history"].append({"role": "user_audio_stream", "parts": [{"audio_bytes_sent": len(audio_pcm_16k_bytes)}]})
+                else:
+                    user_session_data["conversation_history"][-1]["parts"][0]["audio_bytes_sent"] += len(audio_pcm_16k_bytes)
             else:
-                session["messages"].insert(0, {"role": "system", "content": sys_prompt})
+                logging.warning(f"User {input_data.webrtc_id}: Audio processing resulted in empty bytes, not sending.")
+
+            if message == "silence": # VAD triggered, user stopped speaking
+                 logging.info(f"User {input_data.webrtc_id} detected silence (VAD), sending turn_complete=True to Live API.")
+                 await live_session.send_client_content_async(turn_complete=True)
+                 if user_session_data["conversation_history"] and user_session_data["conversation_history"][-1].get("role") == "user_audio_stream":
+                    user_session_data["conversation_history"][-1]["parts"][0]["turn_ended_with_silence"] = True
         
-        # 如果用户有OpenAI客户端，则根据新配置更新客户端
-        if webrtc_id in openai_clients and (data.llm_api_key or data.llm_base_url):
-            api_key = data.llm_api_key if data.llm_api_key else DEFAULT_LLM_API_KEY
-            base_url = data.llm_base_url if data.llm_base_url else DEFAULT_LLM_BASE_URL
-            
-            openai_clients[webrtc_id] = OpenAI(
-                api_key=api_key,
-                base_url=base_url
-            )
+        if input_data.is_camera_on and video_frames:
+            # logging.info(f"User {input_data.webrtc_id} sending {len(video_frames)} video frames to Live API.")
+            for frame_info in video_frames:
+                frame_b64 = frame_info['frame_data']
+                image_bytes = base64.b64decode(frame_b64)
+                await live_session.send_realtime_input_async(image_bytes=image_bytes, mime_type="image/jpeg") # Assuming API supports this
 
-# 初始化路由器，传递配置处理函数
-init_router(stream, rtc_configuration, handle_config_update)
+        full_response_text_parts = []
+        produced_audio_output = False
+        
+        async for event in live_session.receive_async(): 
+            event_type = event.get("event_type")
+            if event_type == "TEXT_CHUNK":
+                text_chunk = event.get("text_chunk", "")
+                full_response_text_parts.append(text_chunk)
+                yield AdditionalOutputs(json.dumps({"type": "text_chunk", "data": text_chunk}))
+            elif event_type == "AUDIO_CHUNK": 
+                audio_chunk_bytes = event.get("audio_chunk")
+                if audio_chunk_bytes:
+                    yield audio_chunk_bytes 
+                    produced_audio_output = True
+            elif event_type == "TRANSCRIPT": 
+                 transcript_data = {"type": "transcript", "data": event.get("transcript", ""), "is_final": event.get("is_final", False)}
+                 yield AdditionalOutputs(json.dumps(transcript_data))
+            elif event_type == "TURN_COMPLETE" and event.get("is_final"):
+                if event.get("last_handle"): 
+                    user_session_data["last_live_api_handle"] = event["last_handle"]
+                    # logging.info(f"Received last_handle for {input_data.webrtc_id} (echo): {event['last_handle']}")
+                break 
 
-# 挂载WebRTC流
-stream.mount(app)
+        final_response_text = "".join(full_response_text_parts)
+        if final_response_text:
+            yield AdditionalOutputs(json.dumps({"type": "assistant_message", "data": final_response_text}))
+        
+        user_session_data["conversation_history"].append({"role": "model", "parts": [{"text": final_response_text, "audio_present": produced_audio_output}]})
 
-# 包含路由
-app.include_router(router)
+        if not final_response_text and not produced_audio_output and (next_action or (audio and audio[1].size > 0)):
+            logging.info(f"Live API for {input_data.webrtc_id} produced no text or audio output for this turn.")
+        
+        user_session_data["next_action"] = "share_memory" 
+        yield AdditionalOutputs(json.dumps({"type": "next_action", "data": user_session_data["next_action"]}))
 
-# 添加主函数，当脚本直接运行时启动uvicorn服务器
-if __name__ == "__main__":
-    import uvicorn
-    logging.info("启动服务器，监听 0.0.0.0:8001")
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    except Exception as e:
+        logging.error(f"Live API echo processing error for {input_data.webrtc_id}: {e}")
+        import traceback
+        logging.error(traceback.format_exc())
+        yield AdditionalOutputs(json.dumps({"type": "error", "data": f"AI Processing Error: {str(e)}"}))
+
+def startup_wrapper_sync(*args: Any) -> Any:
+    webrtc_id_to_use = ""
+    if len(args) > 1: # Try to determine webrtc_id from common fastRTC call patterns
+        if isinstance(args[1], str): webrtc_id_to_use = args[1]
+        elif hasattr(args[1], 'webrtc_id'): webrtc_id_to_use = args[1].webrtc_id
+        elif len(args) > 3 and hasattr(args[3], 'webrtc_id'): webrtc_id_to_use = args[3].webrtc_id 
+    
+    if not webrtc_id_to_use: # Fallback if ID couldn't be determined
+        logging.error(f"startup_wrapper_sync: Could not determine webrtc_id from args: {args}")
+        return iter([]) 
+        
+    # logging.info(f"startup_wrapper_sync called for webrtc_id: {webrtc_id_to_use}")
+    return stream_utils.async_generator_to_sync_iterator(start_up(webrtc_id_to_use))
+
+def echo_wrapper_sync(audio: Optional[tuple[int, np.ndarray]], message: str, input_data: InputData, 
+                      next_action: str = "", video_frames: Optional[List[Dict[str, Any]]] = None) -> Any:
+    return stream_utils.async_generator_to_sync_iterator(
+        echo(audio, message, input_data, next_action, video_frames)
+    )
+
+reply_handler = ReplyOnPause(echo_wrapper_sync, 
+    startup_fn=startup_wrapper_sync, 
+    can_interrupt=True, 
+    model=vad_model 
+)
