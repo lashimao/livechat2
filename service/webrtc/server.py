@@ -20,13 +20,13 @@ import google.generativeai.types as genai_types # For Blob, Part, etc.
 import re # For parsing emotion tags
 
 # Custom utils & routing
-from utils import run_async, generate_sys_prompt, generate_unique_user_id, stream_utils 
+from utils import run_async, generate_sys_prompt, generate_unique_user_id, stream_utils
+# Removed: process_llm_stream, ai_stream, predict_emotion, transcribe, text_to_speech_stream, AsyncMemoryClient
 from ai import AI_MODEL # Kept for generate_sys_prompt model parameter
-# from ai.emotion import predict_emotion # This will be removed
-from routes import router, init_router, get_user_config, InputData # InputData now has google_api_key, gemini_model_name
-from fastapi.middleware.cors import CORSMiddleware # Already here
+from routes import router, init_router, get_user_config, InputData 
+from fastapi.middleware.cors import CORSMiddleware 
 
-load_dotenv() # Already here
+load_dotenv() 
 
 from humaware_vad import HumAwareVADModel # VAD model for detecting speech pauses
 vad_model = HumAwareVADModel() # Already here
@@ -153,8 +153,12 @@ async def get_google_live_session(webrtc_id: str) -> genai_types.ChatSession: # 
     if webrtc_id in active_live_sessions:
         return active_live_sessions[webrtc_id]
 
-    if not genai.get_api_key(): # Check if API key is configured
-        raise ConnectionError("Google API Key not configured for Generative AI client.")
+    if not genai.get_api_key(): 
+        config_from_fe = get_user_config(webrtc_id)
+        api_key_to_use = config_from_fe.google_api_key if config_from_fe and config_from_fe.google_api_key else DEFAULT_GOOGLE_API_KEY
+        if not api_key_to_use:
+            raise ConnectionError("Google API Key not configured for Generative AI client.")
+        genai.configure(api_key=api_key_to_use) # Configure if not already done globally
 
     user_session_data = get_user_session(webrtc_id) 
     config_from_fe = get_user_config(webrtc_id) 
@@ -162,42 +166,50 @@ async def get_google_live_session(webrtc_id: str) -> genai_types.ChatSession: # 
     model_to_use = config_from_fe.gemini_model_name if config_from_fe and config_from_fe.gemini_model_name else DEFAULT_GEMINI_MODEL_NAME
     user_session_data["model_name_in_use"] = model_to_use 
 
-    # Configuration for the official Live API
-    # The official `client.aio.live.connect` takes these as direct parameters or nested config objects.
-    # Based on `Get_started_LiveAPI.ipynb`, it's direct parameters.
     try:
         logging.info(f"Attempting to connect to Google Live API for {webrtc_id} with model {model_to_use}")
-        # The notebook uses client.aio.live.connect()
-        # Assuming global `genai` is configured, we can use `genai.Client().aio.live.connect()`
-        # or if the SDK structure is flat after `import google.generativeai as genai`, it might be `genai.live.connect()`
-        # Let's assume `genai.Client().aio.live.connect()` as per prompt.
-        # If `genai.Client()` needs to be instantiated:
-        client = genai.Client() # This might pick up global config or need specific auth.
         
-        # History needs to be in genai_types.Content format
-        history_for_api = list(user_session_data["conversation_history"]) # Make a copy
+        # Use GenerativeModel instance for live connection as per typical SDK patterns for newer models
+        # if client.aio.live.connect is not the intended path for gemini-1.5+
+        model_instance = genai.GenerativeModel(
+            model_name=model_to_use,
+            system_instruction=user_session_data["system_prompt_content"] 
+            # history can be passed here or in start_chat/connect_live
+        )
+        
+        # The exact method for starting a live session might vary.
+        # `connect_live()` is a placeholder if `start_chat()` doesn't return a live-compatible session.
+        # The prompt mentioned `model.connect_live()` or `client.aio.live.connect`.
+        # Assuming `GenerativeModel` has a method like `start_chat` that could be used for live interaction
+        # or a specific `connect_live`. Given the context, will use a generic `start_chat` and assume it's live-compatible
+        # if the SDK merges these concepts, or that a specific `connect_live` method would exist.
+        # For this refactor, let's assume `model_instance.start_chat(history=...)` is the path and returns a live-capable session.
+        # However, the original prompt for frontend used `ai.live.connect`, implying a direct live connection method.
+        # Let's stick to the previous `client.aio.live.connect` as it's closer to the prompt's intent for a dedicated live API.
+        client = genai.Client() 
+        history_for_api = list(user_session_data["conversation_history"])
 
         live_session = await client.aio.live.connect(
-            model=model_to_use,
+            model=model_to_use, # Model name might need 'models/' prefix depending on SDK version
             system_instruction=genai_types.Content(role="system", parts=[genai_types.Part(text=user_session_data["system_prompt_content"])]),
-            history=history_for_api if history_for_api else None, # Pass existing history if any
-            input_audio_config=genai_types.AudioConfig(sample_rate_hertz=16000), # PCM is default encoding
-            output_audio_config=genai_types.AudioConfig(sample_rate_hertz=24000), # PCM is default encoding
-            response_modalities=[genai_types.ResponseModality.AUDIO], # Primary output is AUDIO
-            output_audio_transcription_config=genai_types.OutputAudioTranscriptionConfig() # Enable transcription of generated audio
+            history=history_for_api if history_for_api else None,
+            input_audio_config=genai_types.AudioConfig(sample_rate_hertz=16000), 
+            output_audio_config=genai_types.AudioConfig(sample_rate_hertz=24000),
+            response_modalities=[genai_types.ResponseModality.AUDIO], 
+            output_audio_transcription_config=genai_types.OutputAudioTranscriptionConfig() 
         )
         active_live_sessions[webrtc_id] = live_session
         logging.info(f"Google Live API session established for {webrtc_id}")
         return live_session
     except Exception as e:
         logging.error(f"Failed to connect to Google Live API for {webrtc_id}: {e}")
-        if webrtc_id in active_live_sessions: # Should not be the case if connect failed, but defensive
+        if webrtc_id in active_live_sessions: 
             del active_live_sessions[webrtc_id]
         raise 
 
-def get_user_ai_model(webrtc_id: str) -> str: 
+def get_user_ai_model(webrtc_id: str) -> str: # This will primarily return the Gemini model name
     config = get_user_config(webrtc_id)
-    if config and config.gemini_model_name:
+    if config and config.gemini_model_name: # Prioritize gemini_model_name from InputData
         return config.gemini_model_name
     # Fallback for older InputData that might have 'ai_model'
     if config and hasattr(config, 'ai_model') and config.ai_model:
@@ -216,57 +228,20 @@ rtc_configuration = {
 }
 
 async def start_up(webrtc_id: str) -> AsyncGenerator[Union[bytes, AdditionalOutputs], None]:
-    user_session_data = get_user_session(webrtc_id)
-    logging.info(f"用户会话数据 (startup Live API): {user_session_data.get('user_name', 'Unknown User')}")
-
+    user_session_data = get_user_session(webrtc_id) 
+    logging.info(f"Placeholder start_up for {webrtc_id}. User: {user_session_data.get('user_name', 'Unknown')}")
+    # This function is a placeholder. 
+    # Actual Gemini Live API interaction for startup will be implemented in the next subtask.
     try:
-        live_session = await get_live_gemini_session(webrtc_id)
-        initial_user_content = "self_motivated_greeting" 
-        logging.info(f"为 {webrtc_id} 发送初始自驱动消息给Live API: '{initial_user_content}'")
-
-        await live_session.send_client_content_async(
-            text=initial_user_content, 
-            turn_complete=True 
-        )
+        yield AdditionalOutputs(json.dumps({"type": "system_message", "data": "System ready. Placeholder for Gemini Live API startup."}))
+        yield AdditionalOutputs(json.dumps({"type": "emotion", "data": "neutral"})) 
+        yield AdditionalOutputs(json.dumps({"type": "next_action", "data": "initial_greeting_done"})) 
         
-        user_session_data["conversation_history"].append({"role": "user", "parts": [{"text": initial_user_content}]})
-
-        welcome_text_parts = []
-        produced_audio_output = False
-
-        async for event in live_session.receive_async(): 
-            event_type = event.get("event_type")
-            if event_type == "TEXT_CHUNK":
-                text_chunk = event.get("text_chunk", "")
-                welcome_text_parts.append(text_chunk)
-                yield AdditionalOutputs(json.dumps({"type": "text_chunk", "data": text_chunk}))
-            elif event_type == "AUDIO_CHUNK": 
-                audio_chunk_bytes = event.get("audio_chunk")
-                if audio_chunk_bytes:
-                    yield audio_chunk_bytes 
-                    produced_audio_output = True
-            elif event_type == "TRANSCRIPT": 
-                 transcript_data = {"type": "transcript", "data": event.get("transcript", ""), "is_final": event.get("is_final", False)}
-                 yield AdditionalOutputs(json.dumps(transcript_data))
-            elif event_type == "TURN_COMPLETE" and event.get("is_final"):
-                if event.get("last_handle"): 
-                    user_session_data["last_live_api_handle"] = event["last_handle"]
-                    logging.info(f"Received last_handle for {webrtc_id} (startup): {event['last_handle']}")
-                break 
-
-        final_welcome_text = "".join(welcome_text_parts)
-        if final_welcome_text:
-            yield AdditionalOutputs(json.dumps({"type": "assistant_message", "data": final_welcome_text}))
-        
-        user_session_data["conversation_history"].append({"role": "model", "parts": [{"text": final_welcome_text, "audio_present": produced_audio_output}]})
-        
-        logging.info(f"Live API 启动响应 for {webrtc_id}: Text='{final_welcome_text if final_welcome_text else '[No text]'}', Audio Produced={produced_audio_output}")
-        
-        user_session_data["next_action"] = "share_memory" 
-        yield AdditionalOutputs(json.dumps({"type": "next_action", "data": user_session_data["next_action"]}))
-
+        if False: 
+            yield b'' 
     except Exception as e:
-        logging.error(f"Live API startup for {webrtc_id} failed: {e}")
+        logging.error(f"Error in placeholder start_up for {webrtc_id}: {e}")
+        yield AdditionalOutputs(json.dumps({"type": "error", "data": f"Startup error: {str(e)}"}))
         import traceback
         logging.error(traceback.format_exc())
         yield AdditionalOutputs(json.dumps({"type": "error", "data": f"AI Connection Error: {str(e)}"}))
@@ -280,81 +255,59 @@ async def echo(
 ) -> AsyncGenerator[Union[bytes, AdditionalOutputs], None]:
     
     user_session_data = get_user_session(input_data.webrtc_id)
-    # logging.debug(f"echo Live API: webrtc_id={input_data.webrtc_id}, audio_present={audio is not None}, msg='{message}', next_action='{next_action}'")
+    # This function will be heavily refactored in the next subtask to use Gemini Live API.
+    # For now, it's a placeholder after removing old service calls.
+    
+    # Log inputs for now
+    logging.info(f"Echo called for {input_data.webrtc_id}. Message: {message}, Next Action: {next_action}")
+    if audio:
+        logging.info(f"Audio received: {len(audio[1])} samples at {audio[0]} Hz")
+    if video_frames:
+        logging.info(f"Video frames received: {len(video_frames)}")
 
-    try:
-        live_session = await get_live_gemini_session(input_data.webrtc_id)
-        
-        if next_action: 
-            logging.info(f"用户 {input_data.webrtc_id} AI触发对话 (Live API): {next_action}")
-            await live_session.send_client_content_async(text=next_action, turn_complete=True)
-            user_session_data["conversation_history"].append({"role": "user", "parts": [{"text": next_action}]})
+    # Placeholder: Simulate processing and yield some outputs
+    # In the next subtask, this will be replaced with actual Gemini Live API interaction.
+    
+    # Simulate user speech transcript if audio was present (mimicking STT)
+    if audio and audio[1].size > 0 and not next_action:
+        simulated_transcript = f"User said something (audio length {len(audio[1])})"
+        yield AdditionalOutputs(json.dumps({"type": "transcript", "data": simulated_transcript, "is_final": True}))
+        # Add to history (placeholder, real STT would be used)
+        user_session_data["conversation_history"].append(genai_types.Content(role="user", parts=[genai_types.Part(text=simulated_transcript)]))
 
-        elif audio and audio[1].size > 0:
-            sample_rate, audio_np = audio 
-            audio_pcm_16k_bytes = audio_numpy_to_pcm_bytes(audio_np, sample_rate, target_sample_rate=16000)
-            
-            if audio_pcm_16k_bytes:
-                await live_session.send_realtime_input_async(audio_bytes=audio_pcm_16k_bytes)
-                # logging.debug(f"User {input_data.webrtc_id} sent audio (PCM 16kHz) to Live API, {len(audio_pcm_16k_bytes)} bytes.")
-                # Simplified history update for audio chunks
-                if not user_session_data["conversation_history"] or user_session_data["conversation_history"][-1].get("role") != "user_audio_stream":
-                    user_session_data["conversation_history"].append({"role": "user_audio_stream", "parts": [{"audio_bytes_sent": len(audio_pcm_16k_bytes)}]})
-                else:
-                    user_session_data["conversation_history"][-1]["parts"][0]["audio_bytes_sent"] += len(audio_pcm_16k_bytes)
-            else:
-                logging.warning(f"User {input_data.webrtc_id}: Audio processing resulted in empty bytes, not sending.")
 
-            if message == "silence": # VAD triggered, user stopped speaking
-                 logging.info(f"User {input_data.webrtc_id} detected silence (VAD), sending turn_complete=True to Live API.")
-                 await live_session.send_client_content_async(turn_complete=True)
-                 if user_session_data["conversation_history"] and user_session_data["conversation_history"][-1].get("role") == "user_audio_stream":
-                    user_session_data["conversation_history"][-1]["parts"][0]["turn_ended_with_silence"] = True
-        
-        if input_data.is_camera_on and video_frames:
-            # logging.info(f"User {input_data.webrtc_id} sending {len(video_frames)} video frames to Live API.")
-            for frame_info in video_frames:
-                frame_b64 = frame_info['frame_data']
-                image_bytes = base64.b64decode(frame_b64)
-                await live_session.send_realtime_input_async(image_bytes=image_bytes, mime_type="image/jpeg") # Assuming API supports this
+    # Simulate AI response (text, audio, emotion)
+    ai_response_text = f"AI responding to '{message if not next_action else next_action}'... (placeholder)"
+    # Simulate emotion tag parsing (as if AI included it)
+    emotion_to_send = "neutral"
+    emotion_match = re.search(r"\[(neutral|joy|anger|sadness|shy|surprised|thinking)\]", ai_response_text, re.IGNORECASE)
+    if emotion_match:
+        emotion_to_send = emotion_match.group(1).lower()
+        ai_response_text = ai_response_text.replace(emotion_match.group(0), "").lstrip()
 
-        full_response_text_parts = []
-        produced_audio_output = False
-        
-        async for event in live_session.receive_async(): 
-            event_type = event.get("event_type")
-            if event_type == "TEXT_CHUNK":
-                text_chunk = event.get("text_chunk", "")
-                full_response_text_parts.append(text_chunk)
-                yield AdditionalOutputs(json.dumps({"type": "text_chunk", "data": text_chunk}))
-            elif event_type == "AUDIO_CHUNK": 
-                audio_chunk_bytes = event.get("audio_chunk")
-                if audio_chunk_bytes:
-                    yield audio_chunk_bytes 
-                    produced_audio_output = True
-            elif event_type == "TRANSCRIPT": 
-                 transcript_data = {"type": "transcript", "data": event.get("transcript", ""), "is_final": event.get("is_final", False)}
-                 yield AdditionalOutputs(json.dumps(transcript_data))
-            elif event_type == "TURN_COMPLETE" and event.get("is_final"):
-                if event.get("last_handle"): 
-                    user_session_data["last_live_api_handle"] = event["last_handle"]
-                    # logging.info(f"Received last_handle for {input_data.webrtc_id} (echo): {event['last_handle']}")
-                break 
+    yield AdditionalOutputs(json.dumps({"type": "text_chunk", "data": ai_response_text}))
+    yield AdditionalOutputs(json.dumps({"type": "assistant_message", "data": ai_response_text}))
+    yield AdditionalOutputs(json.dumps({"type": "emotion", "data": emotion_to_send}))
 
-        final_response_text = "".join(full_response_text_parts)
-        if final_response_text:
-            yield AdditionalOutputs(json.dumps({"type": "assistant_message", "data": final_response_text}))
-        
-        user_session_data["conversation_history"].append({"role": "model", "parts": [{"text": final_response_text, "audio_present": produced_audio_output}]})
+    # Simulate sending some audio bytes (e.g., silent audio if nothing else)
+    # This would be actual AI speech audio from Gemini.
+    # Creating a short silent audio chunk for placeholder. 1 sec of 24kHz 16-bit mono.
+    silent_audio_duration_ms = 200 
+    num_frames = int(24000 * (silent_audio_duration_ms / 1000))
+    silent_audio_bytes = b'\x00\x00' * num_frames 
+    yield silent_audio_bytes 
+    
+    # Update history with AI's placeholder response
+    user_session_data["conversation_history"].append(genai_types.Content(role="model", parts=[genai_types.Part(text=ai_response_text)]))
 
-        if not final_response_text and not produced_audio_output and (next_action or (audio and audio[1].size > 0)):
-            logging.info(f"Live API for {input_data.webrtc_id} produced no text or audio output for this turn.")
-        
-        user_session_data["next_action"] = "share_memory" 
-        yield AdditionalOutputs(json.dumps({"type": "next_action", "data": user_session_data["next_action"]}))
+    # Placeholder for next action
+    user_session_data["next_action"] = "another_placeholder_action"
+    yield AdditionalOutputs(json.dumps({"type": "next_action", "data": user_session_data["next_action"]}))
 
-    except Exception as e:
-        logging.error(f"Live API echo processing error for {input_data.webrtc_id}: {e}")
+    # Ensure the generator actually yields if no conditions are met above
+    if not (audio and audio[1].size > 0 and not next_action): # if not already yielded transcript
+        if not next_action: # if not AI triggered
+             pass # No specific yield needed for pure silence without action
         import traceback
         logging.error(traceback.format_exc())
         yield AdditionalOutputs(json.dumps({"type": "error", "data": f"AI Processing Error: {str(e)}"}))

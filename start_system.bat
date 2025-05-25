@@ -1,6 +1,21 @@
 @echo OFF
 REM Script to install dependencies and start the Amadeus-like AI system
 
+REM Check for FFmpeg 
+ECHO Checking for FFmpeg in PATH... 
+ffmpeg -version >nul 2>&1 
+IF ERRORLEVEL 9009 ( 
+    ECHO WARNING: ffmpeg not found in PATH. 
+    ECHO This might cause issues with audio processing (e.g., for pydub). 
+    ECHO Please install FFmpeg and add it to your system's PATH. 
+    ECHO You can download it from https://ffmpeg.org/download.html 
+    ECHO Script will continue, but audio functionality may be impaired. 
+    PAUSE 
+) ELSE ( 
+    ECHO FFmpeg found. 
+) 
+ECHO. 
+
 ECHO Starting Backend Service...
 cd service/webrtc
 
