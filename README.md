@@ -55,9 +55,27 @@ This project implements a real-time interactive AI character, Makise Kurisu, ins
       npm install 
       ``` 
 
-## Running the Application 
+## Running the Application
 
-**Using the `start_system.bat` script (Windows 10):** 
+**Using the `start_system.py` script (Recommended for Windows 10, adaptable for other OS):**
+
+1.  Ensure you have completed all the setup steps above (Python 3.9+ installed and in PATH, Node.js with npm, FFmpeg in PATH, and the `.env` file in `service/webrtc/` correctly configured with your `GOOGLE_API_KEY` and `GEMINI_MODEL_NAME`).
+2.  Navigate to the project root directory in your terminal/command prompt.
+3.  Run the Python script:
+    ```bash
+    python start_system.py
+    ```
+
+This script will:
+*   Check for FFmpeg in your PATH and warn you if it's missing (exiting if it's critical).
+*   Set up the Python virtual environment in `service/webrtc/venv/` (if not already present).
+*   Install Python dependencies from `service/webrtc/requirements.txt` into the virtual environment.
+*   Start the Python FastAPI backend server (from `service/webrtc/server.py`) in a background process. Its console output might appear in a new window (Windows) or be managed by the script.
+*   Install Node.js dependencies from the root `package.json` (if needed).
+*   Start the Electron frontend application (using `npm run electron:dev` or the relevant command from `package.json`).
+*   The script will remain running to monitor the subprocesses. Press Ctrl+C in the terminal where you ran `start_system.py` to attempt to shut down all started processes.
+
+**(Alternative for Windows) Using the `start_system.bat` script:**
 
 1.  Ensure you have completed all the setup steps above (Python, Node.js, FFmpeg in PATH, `.env` file configured). 
 2.  Navigate to the project root directory. 
@@ -75,7 +93,7 @@ This script will:
 
 1.  **Start the Backend:** 
     *   Open a terminal, navigate to `service/webrtc/`. 
-    *   Activate the virtual environment (`venv\Scripts\activate`). 
+    *   Activate the virtual environment (`venv\Scripts\activate` on Windows, or `source venv/bin/activate` on macOS/Linux). 
     *   Run `python server.py`. 
 2.  **Start the Frontend:** 
     *   Open another terminal, navigate to the project root. 
